@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>GoingCooperative</AssemblyName>
+    <RootNamespace>GoingCooperative.Plugin.BepInEx</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoStdLib>true</NoStdLib>
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+    <GameRoot Condition="'$(GameRoot)' == ''">$(GOING_COOPERATIVE_GAME_ROOT)</GameRoot>
+    <BepInExRoot Condition="'$(BepInExRoot)' == ''">$(GameRoot)\BepInEx\core</BepInExRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
+    <Compile Include="..\GoingCooperative.Core\**\*.cs" Exclude="..\GoingCooperative.Core\bin\**;..\GoingCooperative.Core\obj\**" Link="Core\%(RecursiveDir)%(Filename)%(Extension)" />
+
+    <Reference Include="BepInEx" HintPath="$(BepInExRoot)\BepInEx.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExRoot)\0Harmony.dll" Private="false" />
+    <Reference Include="mscorlib" HintPath="$(GameRoot)\Going Medieval_Data\Managed\mscorlib.dll" Private="false" />
+    <Reference Include="System" HintPath="$(GameRoot)\Going Medieval_Data\Managed\System.dll" Private="false" />
+    <Reference Include="System.Core" HintPath="$(GameRoot)\Going Medieval_Data\Managed\System.Core.dll" Private="false" />
+    <Reference Include="netstandard" HintPath="$(GameRoot)\Going Medieval_Data\Managed\netstandard.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(GameRoot)\Going Medieval_Data\Managed\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(GameRoot)\Going Medieval_Data\Managed\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AnimationModule" HintPath="$(GameRoot)\Going Medieval_Data\Managed\UnityEngine.AnimationModule.dll" Private="false" />
+    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(GameRoot)\Going Medieval_Data\Managed\UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="UnityEngine.InputLegacyModule" HintPath="$(GameRoot)\Going Medieval_Data\Managed\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(GameRoot)\Going Medieval_Data\Managed\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(GameRoot)\Going Medieval_Data\Managed\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="Assembly-CSharp" HintPath="$(GameRoot)\Going Medieval_Data\Managed\Assembly-CSharp.dll" Private="false" />
+  </ItemGroup>
+</Project>

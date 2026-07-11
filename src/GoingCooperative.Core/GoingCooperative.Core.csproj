@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>GoingCooperative.Core</AssemblyName>
+    <RootNamespace>GoingCooperative.Core</RootNamespace>
+  </PropertyGroup>
+</Project>

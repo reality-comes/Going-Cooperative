@@ -1,0 +1,47 @@
+# Build and release output
+artifacts/
+**/bin/
+**/obj/
+
+# Local game and mod-loader dependencies
+Going Medieval_Data/
+MonoBleedingEdge/
+BepInEx/
+lib/
+*.dll
+*.exe
+doorstop_config.ini
+winhttp.dll
+
+# Machine-specific runtime configuration
+GoingCooperative/replication.cfg
+replication.cfg
+
+# Runtime logs, diagnostics, saves, and captures
+*.log
+*.jsonl
+captures/
+saves/
+
+# Local .NET and package caches
+.dotnet/
+.dotnet-home/
+.nuget/
+.tmp/
+tmp/
+TestResults/
+
+# IDE and editor metadata
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local archive or scratch areas
+DUMP/
