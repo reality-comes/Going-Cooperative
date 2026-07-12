@@ -14,6 +14,70 @@ namespace GoingCooperative.Core
         public const string CutPlantAction = "CutPlant";
         public const string RegionOrderAction = "RegionOrder";
         public const string EquipOrderAction = "EquipOrder";
+        public const string ResearchActivateAction = "ResearchActivate";
+        public const string ProductionQueueAction = "ProductionQueue";
+
+        public static string CreateResearchActivatePayload(string nodeId)
+        {
+            return "{\"action\":\"" + ResearchActivateAction + "\",\"nodeId\":\"" + EscapeJsonString(nodeId) + "\"}";
+        }
+
+        public static bool TryReadResearchActivatePayload(string payloadJson, out string nodeId)
+        {
+            var normalized = Normalize(payloadJson);
+            nodeId = string.Empty;
+            return normalized.IndexOf("\"action\":\"" + ResearchActivateAction + "\"", StringComparison.Ordinal) >= 0
+                && TryReadStringProperty(normalized, "nodeId", out nodeId)
+                && !string.IsNullOrWhiteSpace(nodeId);
+        }
+
+        public static string CreateProductionQueuePayload(
+            string operation,
+            int buildingX,
+            int buildingY,
+            int buildingZ,
+            int ticketIndex,
+            string blueprintId,
+            int value)
+        {
+            return "{\"action\":\"" + ProductionQueueAction
+                + "\",\"operation\":\"" + EscapeJsonString(operation)
+                + "\",\"buildingX\":" + buildingX.ToString(CultureInfo.InvariantCulture)
+                + ",\"buildingY\":" + buildingY.ToString(CultureInfo.InvariantCulture)
+                + ",\"buildingZ\":" + buildingZ.ToString(CultureInfo.InvariantCulture)
+                + ",\"ticketIndex\":" + ticketIndex.ToString(CultureInfo.InvariantCulture)
+                + ",\"blueprintId\":\"" + EscapeJsonString(blueprintId)
+                + "\",\"value\":" + value.ToString(CultureInfo.InvariantCulture)
+                + "}";
+        }
+
+        public static bool TryReadProductionQueuePayload(
+            string payloadJson,
+            out string operation,
+            out int buildingX,
+            out int buildingY,
+            out int buildingZ,
+            out int ticketIndex,
+            out string blueprintId,
+            out int value)
+        {
+            var normalized = Normalize(payloadJson);
+            operation = string.Empty;
+            buildingX = 0;
+            buildingY = 0;
+            buildingZ = 0;
+            ticketIndex = -1;
+            blueprintId = string.Empty;
+            value = 0;
+            return normalized.IndexOf("\"action\":\"" + ProductionQueueAction + "\"", StringComparison.Ordinal) >= 0
+                && TryReadStringProperty(normalized, "operation", out operation)
+                && TryReadIntProperty(normalized, "buildingX", out buildingX)
+                && TryReadIntProperty(normalized, "buildingY", out buildingY)
+                && TryReadIntProperty(normalized, "buildingZ", out buildingZ)
+                && TryReadIntProperty(normalized, "ticketIndex", out ticketIndex)
+                && TryReadStringProperty(normalized, "blueprintId", out blueprintId)
+                && TryReadIntProperty(normalized, "value", out value);
+        }
 
         public static string CreatePausePayload(bool paused)
         {

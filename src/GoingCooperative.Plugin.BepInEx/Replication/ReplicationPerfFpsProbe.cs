@@ -205,6 +205,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 + replicationConfigMaxSnapshotEntities.ToString(CultureInfo.InvariantCulture)
                 + " snapshotHz="
                 + replicationConfigSnapshotHz.ToString(CultureInfo.InvariantCulture)
+                + " "
+                + FormatReplicationPresentationSmoothingStatus()
+                + " "
+                + FormatReplicationNeedsStatus()
                 + " lastGameTime="
                 + (string.IsNullOrEmpty(replicationLastGameTimeSummary) ? "<none>" : replicationLastGameTimeSummary));
 

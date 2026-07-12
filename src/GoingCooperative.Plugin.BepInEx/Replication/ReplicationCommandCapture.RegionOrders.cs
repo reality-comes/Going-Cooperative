@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
 using GoingCooperative.Core;
@@ -31,6 +32,9 @@ namespace GoingCooperative.Plugin.BepInEx
         private static string replicationLastAreaOrderSubType = string.Empty;
         private static float replicationLastAreaOrderRealtime;
         private static float replicationNextRegionSelectionLogRealtime;
+        private static string replicationZoneModifyOperation = string.Empty;
+        private static string replicationZoneModifyId = string.Empty;
+        private static float replicationZoneModifyRealtime;
 
         private int TryInstallReplicationRegionCommandCapture(Harmony harmonyInstance)
         {
@@ -69,6 +73,21 @@ namespace GoingCooperative.Plugin.BepInEx
             var stockpilePostfix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
                 nameof(ReplicationRegionStockpileSpawnPostfix),
                 BindingFlags.Static | BindingFlags.NonPublic));
+            var zoneModifyPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationStockpileZoneModifyPrefix),
+                BindingFlags.Static | BindingFlags.NonPublic));
+            var contextualObjectPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationContextualObjectActionPrefix),
+                BindingFlags.Static | BindingFlags.NonPublic));
+            var contextualResourcePrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationContextualResourceGiveOrderPrefix),
+                BindingFlags.Static | BindingFlags.NonPublic));
+            var contextualBuildingPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationContextualBuildingDeconstructPrefix),
+                BindingFlags.Static | BindingFlags.NonPublic));
+            var infoPanelActionPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationInfoPanelActionPrefix),
+                BindingFlags.Static | BindingFlags.NonPublic));
 
             var patchedCount = 0;
             patchedCount += TryPatchReplicationCommandCaptureMethodByTypeNames(harmonyInstance, orderPanelPostfix, "NSMedieval.UI.OrdersPanelView", "OnOrderButtonClick", "NSMedieval.Types.OrderType");
@@ -94,9 +113,17 @@ namespace GoingCooperative.Plugin.BepInEx
             patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(harmonyInstance, areaOrderPrefix, "NSMedieval.Managers.Selection.SelectionManager", "ZoneSelectionFinished");
             patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(harmonyInstance, areaOrderPrefix, "NSMedieval.Managers.Selection.SelectionManager", "OnAreaOrderTempHack");
             patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(harmonyInstance, areaOrderPrefix, "NSMedieval.Managers.Selection.SelectionManager", "OnSelectArea", "NSMedieval.Types.AreaType", "System.String");
-            patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(harmonyInstance, areaOrderPrefix, "NSMedieval.Managers.Selection.SelectionManager", "ExpandZone", "System.String");
-            patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(harmonyInstance, areaOrderPrefix, "NSMedieval.Managers.Selection.SelectionManager", "ShrinkZone", "System.String");
+            // ExpandZone/ShrinkZone only arm the vanilla selection mode. Sending
+            // here commits the previous selection and creates a second command.
+            // StockpileView records the mode; ZoneSelectionFinished sends once.
             patchedCount += TryPatchReplicationCommandCaptureMethodByTypeNames(harmonyInstance, stockpilePostfix, "NSMedieval.Stockpiles.StockpileManager", "SpawnStockpile", "NSMedieval.Stockpiles.Stockpile", "NSMedieval.Vec3Int", "NSMedieval.Vec3Int");
+            patchedCount += TryPatchReplicationCommandCaptureMethod(harmonyInstance, zoneModifyPrefix, "NSMedieval.Stockpiles.StockpileView", "ExpandStockpile", Type.EmptyTypes);
+            patchedCount += TryPatchReplicationCommandCaptureMethod(harmonyInstance, zoneModifyPrefix, "NSMedieval.Stockpiles.StockpileView", "ShrinkStockpile", Type.EmptyTypes);
+            patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(
+                harmonyInstance,
+                infoPanelActionPrefix,
+                "NSMedieval.UI.InfoPanelAction",
+                "RunCurrentAction");
             patchedCount += TryPatchPassiveCommandSurfaceMethodsByName(harmonyInstance, resourceSurfacePostfix, "NSMedieval.Manager.PlantResourceManager", "OnOrderChopEvent");
             patchedCount += TryPatchPassiveCommandSurfaceMethodsByName(harmonyInstance, resourceSurfacePostfix, "NSMedieval.Manager.PlantResourceManager", "OnOrderResourceCollectionEventCallback");
             patchedCount += TryPatchPassiveCommandSurfaceMethodsByName(harmonyInstance, resourceSurfacePostfix, "NSMedieval.Manager.MapResourceManager`3", "OnForceOrderOnResource");
@@ -256,6 +283,12 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var methodName = __originalMethod?.Name ?? string.Empty;
+            if (string.Equals(methodName, "OnModifyZone", StringComparison.Ordinal))
+            {
+                // This opens the vanilla drag-selection UI. The committed operation is
+                // captured once at ZoneSelectionFinished.
+                return true;
+            }
             var areaType = ResolveReplicationAreaOrderType(__instance, methodName, __args);
             var subType = ResolveReplicationAreaOrderSubType(__instance, methodName, __args);
             if (!TryResolveReplicationSelectionRegion(
@@ -280,6 +313,13 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var orderType = ResolveReplicationAreaOrderCommandType(methodName, areaType);
+            if (string.Equals(methodName, "ZoneSelectionFinished", StringComparison.Ordinal)
+                && IsReplicationZoneModifyActive())
+            {
+                orderType = replicationZoneModifyOperation;
+                areaType = "StockpileModify";
+                subType = replicationZoneModifyId;
+            }
             instance?.LogReplicationInfo("Going Cooperative replication region area order mode="
                 + replicationConfigRegionCommandMode
                 + " method="
@@ -312,7 +352,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 return true;
             }
 
-            return !CaptureReplicationRegionOrderIntent(
+            var suppress = CaptureReplicationRegionOrderIntent(
                 orderType,
                 startX,
                 startY,
@@ -324,6 +364,639 @@ namespace GoingCooperative.Plugin.BepInEx
                 areaType,
                 subType,
                 "area:" + methodName);
+            if (string.Equals(methodName, "ZoneSelectionFinished", StringComparison.Ordinal)
+                && IsReplicationZoneModifyActive())
+            {
+                replicationZoneModifyOperation = string.Empty;
+                replicationZoneModifyId = string.Empty;
+                replicationZoneModifyRealtime = 0f;
+            }
+
+            return !suppress;
+        }
+
+        private static void ReplicationStockpileZoneModifyPrefix(MethodBase __originalMethod, object __instance)
+        {
+            if (!ShouldObserveReplicationRegionCommands())
+            {
+                return;
+            }
+
+            replicationZoneModifyOperation = string.Equals(__originalMethod?.Name, "ShrinkStockpile", StringComparison.Ordinal)
+                ? "ShrinkZone"
+                : "ExpandZone";
+            replicationZoneModifyId = ResolveReplicationStockpileZoneId(__instance);
+            replicationZoneModifyRealtime = Time.realtimeSinceStartup;
+            instance?.LogReplicationInfo("Going Cooperative replication stockpile modify armed operation="
+                + replicationZoneModifyOperation
+                + " stockpileId="
+                + (string.IsNullOrWhiteSpace(replicationZoneModifyId) ? "<none>" : replicationZoneModifyId));
+        }
+
+        private static bool ReplicationContextualObjectActionPrefix(MethodBase __originalMethod, object __0)
+        {
+            if (!ShouldObserveReplicationRegionCommands() || __0 == null)
+            {
+                return true;
+            }
+
+            if (!TryResolveReplicationContextualObjectGrid(__0, out var x, out var y, out var z, out var positionDetail))
+            {
+                instance?.LogReplicationWarning("Going Cooperative replication contextual action target unresolved method="
+                    + (__originalMethod?.Name ?? string.Empty)
+                    + " targetType="
+                    + (__0.GetType().FullName ?? __0.GetType().Name)
+                    + " detail="
+                    + positionDetail);
+                return true;
+            }
+
+            var methodName = __originalMethod?.Name ?? string.Empty;
+            var orderType = methodName.IndexOf("Deconstruct", StringComparison.OrdinalIgnoreCase) >= 0
+                ? "Deconstruct"
+                : "Chopping";
+            instance?.LogReplicationInfo("Going Cooperative replication contextual action captured method="
+                + methodName
+                + " orderType="
+                + orderType
+                + " targetType="
+                + (__0.GetType().FullName ?? __0.GetType().Name)
+                + " grid=Vec3Int("
+                + x.ToString(CultureInfo.InvariantCulture)
+                + ","
+                + y.ToString(CultureInfo.InvariantCulture)
+                + ","
+                + z.ToString(CultureInfo.InvariantCulture)
+                + ") detail="
+                + positionDetail);
+
+            return !CaptureReplicationRegionOrderIntent(
+                orderType,
+                x,
+                y,
+                z,
+                x,
+                y,
+                z,
+                "None",
+                "ContextualObject",
+                __0.GetType().FullName ?? __0.GetType().Name,
+                "contextual:" + methodName);
+        }
+
+        private static bool ReplicationContextualResourceGiveOrderPrefix(MethodBase __originalMethod, object __instance, object __0)
+        {
+            if (!ShouldObserveReplicationRegionCommands() || __instance == null || __0 == null)
+            {
+                return true;
+            }
+
+            if (!TryResolveReplicationContextualObjectGrid(__instance, out var x, out var y, out var z, out var positionDetail))
+            {
+                instance?.LogReplicationWarning("Going Cooperative replication contextual resource target unresolved type="
+                    + (__instance.GetType().FullName ?? __instance.GetType().Name)
+                    + " orderType="
+                    + __0
+                    + " detail="
+                    + positionDetail);
+                return true;
+            }
+
+            var orderType = NormalizeReplicationContextualResourceOrderType(__0.ToString() ?? string.Empty);
+            instance?.LogReplicationInfo("Going Cooperative replication contextual resource captured method="
+                + (__originalMethod?.Name ?? string.Empty)
+                + " orderType="
+                + orderType
+                + " nativeOrderType="
+                + __0
+                + " targetType="
+                + (__instance.GetType().FullName ?? __instance.GetType().Name)
+                + " grid=Vec3Int("
+                + x.ToString(CultureInfo.InvariantCulture)
+                + ","
+                + y.ToString(CultureInfo.InvariantCulture)
+                + ","
+                + z.ToString(CultureInfo.InvariantCulture)
+                + ") detail="
+                + positionDetail);
+
+            return !CaptureReplicationRegionOrderIntent(
+                orderType,
+                x,
+                y,
+                z,
+                x,
+                y,
+                z,
+                "None",
+                "ContextualResource",
+                __instance.GetType().FullName ?? __instance.GetType().Name,
+                "contextual-resource:GiveOrder");
+        }
+
+        private static bool ReplicationInfoPanelActionPrefix(object __instance)
+        {
+            if (!ShouldObserveReplicationRegionCommands() || __instance == null)
+            {
+                return true;
+            }
+
+            try
+            {
+                var actionType = __instance.GetType();
+                var getCurrentData = AccessTools.Method(actionType, "GetCurrentActionData", Type.EmptyTypes);
+                var actionData = getCurrentData?.Invoke(__instance, null);
+                var actionId = actionData == null
+                    ? string.Empty
+                    : (AccessTools.Method(actionData.GetType(), "GetID", Type.EmptyTypes)?.Invoke(actionData, null)?.ToString() ?? string.Empty);
+                if (!TryNormalizeReplicationInfoPanelOrderType(actionId, out var orderType))
+                {
+                    return true;
+                }
+
+                var objectActions = AccessTools.Property(actionType, "ObjectActions")?.GetValue(__instance, null)
+                    ?? AccessTools.Field(actionType, "<ObjectActions>k__BackingField")?.GetValue(__instance);
+                var currentIndexValue = AccessTools.Property(actionType, "CurrentIndex")?.GetValue(__instance, null)
+                    ?? AccessTools.Field(actionType, "<CurrentIndex>k__BackingField")?.GetValue(__instance);
+                var currentIndex = currentIndexValue == null
+                    ? 0
+                    : Convert.ToInt32(currentIndexValue, CultureInfo.InvariantCulture);
+                if (!(objectActions is Array actionArray)
+                    || currentIndex < 0
+                    || currentIndex >= actionArray.Length)
+                {
+                    instance?.LogReplicationWarning("Going Cooperative replication info-panel action target unavailable actionId="
+                        + actionId
+                        + " reason=action-array-or-index");
+                    return true;
+                }
+
+                var pair = actionArray.GetValue(currentIndex);
+                var actionDelegate = pair == null
+                    ? null
+                    : AccessTools.Property(pair.GetType(), "Value")?.GetValue(pair, null) as Delegate;
+                var delegateTarget = actionDelegate?.Target;
+                if (!TryResolveReplicationInfoPanelDelegateTarget(delegateTarget, out var target, out var targetDetail)
+                    || target == null
+                    || !TryResolveReplicationContextualObjectGrid(target, out var x, out var y, out var z, out var positionDetail))
+                {
+                    instance?.LogReplicationWarning("Going Cooperative replication info-panel action target unresolved actionId="
+                        + actionId
+                        + " detail="
+                        + targetDetail);
+                    return true;
+                }
+
+                instance?.LogReplicationInfo("Going Cooperative replication info-panel action captured actionId="
+                    + actionId
+                    + " orderType="
+                    + orderType
+                    + " targetType="
+                    + (target.GetType().FullName ?? target.GetType().Name)
+                    + " grid=Vec3Int("
+                    + x.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + y.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + z.ToString(CultureInfo.InvariantCulture)
+                    + ") targetDetail="
+                    + targetDetail
+                    + " positionDetail="
+                    + positionDetail);
+
+                return !CaptureReplicationRegionOrderIntent(
+                    orderType,
+                    x,
+                    y,
+                    z,
+                    x,
+                    y,
+                    z,
+                    "None",
+                    "InfoPanelAction",
+                    actionId,
+                    "info-panel:" + actionId);
+            }
+            catch (Exception ex)
+            {
+                instance?.LogReplicationWarning("Going Cooperative replication info-panel action capture failed "
+                    + ex.GetType().Name
+                    + " "
+                    + ex.Message);
+                return true;
+            }
+        }
+
+        private static bool TryNormalizeReplicationInfoPanelOrderType(string actionId, out string orderType)
+        {
+            orderType = string.Empty;
+            if (string.Equals(actionId, "Chopping", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(actionId, "CutAllVegetation", StringComparison.OrdinalIgnoreCase))
+            {
+                orderType = string.Equals(actionId, "CutAllVegetation", StringComparison.OrdinalIgnoreCase)
+                    ? "CutAllVegetation"
+                    : "Chopping";
+                return true;
+            }
+
+            if (string.Equals(actionId, "Harvesting", StringComparison.OrdinalIgnoreCase))
+            {
+                orderType = "Harvesting";
+                return true;
+            }
+
+            if (string.Equals(actionId, "Cancel", StringComparison.OrdinalIgnoreCase))
+            {
+                orderType = "Cancel";
+                return true;
+            }
+
+            if (string.Equals(actionId, "Forbid", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(actionId, "Allow", StringComparison.OrdinalIgnoreCase))
+            {
+                orderType = string.Equals(actionId, "Forbid", StringComparison.OrdinalIgnoreCase)
+                    ? "Forbid"
+                    : "Allow";
+                return true;
+            }
+
+            if (string.Equals(actionId, "UrgentHaul", StringComparison.OrdinalIgnoreCase))
+            {
+                orderType = "UrgentHaul";
+                return true;
+            }
+
+            if (actionId.IndexOf("Deconstruct", StringComparison.OrdinalIgnoreCase) >= 0
+                || actionId.IndexOf("Demol", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                orderType = "Deconstruct";
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryResolveReplicationInfoPanelDelegateTarget(
+            object? delegateTarget,
+            out object? target,
+            out string detail)
+        {
+            target = null;
+            if (delegateTarget == null)
+            {
+                detail = "delegate-target-null";
+                return false;
+            }
+
+            if (delegateTarget is Component)
+            {
+                target = delegateTarget;
+                detail = "delegate-target-component";
+                return true;
+            }
+
+            var fields = delegateTarget.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            for (var i = 0; i < fields.Length; i++)
+            {
+                object? value;
+                try
+                {
+                    value = fields[i].GetValue(delegateTarget);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (value is Component)
+                {
+                    target = value;
+                    detail = "delegate-field=" + fields[i].Name;
+                    return true;
+                }
+
+                if (value != null && TryReadReplicationWorldObjectGridPosition(value, out _, out _, out _))
+                {
+                    target = value;
+                    detail = "delegate-grid-field=" + fields[i].Name;
+                    return true;
+                }
+            }
+
+            detail = "delegate-fields-no-target type=" + (delegateTarget.GetType().FullName ?? delegateTarget.GetType().Name);
+            return false;
+        }
+
+        private static bool ReplicationContextualBuildingDeconstructPrefix(object __instance, object __0)
+        {
+            if (!ShouldObserveReplicationRegionCommands() || __instance == null)
+            {
+                return true;
+            }
+
+            if (!TryResolveReplicationContextualObjectGrid(__instance, out var x, out var y, out var z, out var positionDetail))
+            {
+                instance?.LogReplicationWarning("Going Cooperative replication contextual building target unresolved type="
+                    + (__instance.GetType().FullName ?? __instance.GetType().Name)
+                    + " detail="
+                    + positionDetail);
+                return true;
+            }
+
+            instance?.LogReplicationInfo("Going Cooperative replication contextual building captured orderType=Deconstruct nativeOrderType="
+                + (__0?.ToString() ?? string.Empty)
+                + " targetType="
+                + (__instance.GetType().FullName ?? __instance.GetType().Name)
+                + " grid=Vec3Int("
+                + x.ToString(CultureInfo.InvariantCulture)
+                + ","
+                + y.ToString(CultureInfo.InvariantCulture)
+                + ","
+                + z.ToString(CultureInfo.InvariantCulture)
+                + ") detail="
+                + positionDetail);
+
+            return !CaptureReplicationRegionOrderIntent(
+                "Deconstruct",
+                x,
+                y,
+                z,
+                x,
+                y,
+                z,
+                "None",
+                "ContextualBuilding",
+                __0?.ToString() ?? string.Empty,
+                "contextual-building:MarkForDeconstruction");
+        }
+
+        private static string NormalizeReplicationContextualResourceOrderType(string nativeOrderType)
+        {
+            if (nativeOrderType.IndexOf("Harvest", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "Harvesting";
+            }
+
+            if (nativeOrderType.IndexOf("Cancel", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "Cancel";
+            }
+
+            if (nativeOrderType.IndexOf("Fish", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "Fishing";
+            }
+
+            return "Chopping";
+        }
+
+        private int TryPatchReplicationContextualGiveOrder(Harmony harmonyInstance, HarmonyMethod prefix)
+        {
+            try
+            {
+                var genericType = AccessTools.TypeByName("NSMedieval.Views.Resources.MapResourceView`1");
+                if (genericType == null)
+                {
+                    AppendPluginLog("Replication contextual GiveOrder type missing");
+                    return 0;
+                }
+
+                var patched = new HashSet<MethodBase>();
+                var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+                for (var assemblyIndex = 0; assemblyIndex < assemblies.Length; assemblyIndex++)
+                {
+                    Type[] types;
+                    try
+                    {
+                        types = assemblies[assemblyIndex].GetTypes();
+                    }
+                    catch (ReflectionTypeLoadException ex)
+                    {
+                        var loaded = new List<Type>();
+                        var candidates = ex.Types;
+                        for (var candidateIndex = 0; candidateIndex < candidates.Length; candidateIndex++)
+                        {
+                            if (candidates[candidateIndex] != null)
+                            {
+                                loaded.Add(candidates[candidateIndex]!);
+                            }
+                        }
+
+                        types = loaded.ToArray();
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    for (var typeIndex = 0; typeIndex < types.Length; typeIndex++)
+                    {
+                        var concreteType = types[typeIndex];
+                        if (concreteType == null || concreteType.ContainsGenericParameters)
+                        {
+                            continue;
+                        }
+
+                        var derivesFromMapResource = false;
+                        for (var current = concreteType; current != null; current = current.BaseType)
+                        {
+                            if (current.IsGenericType && current.GetGenericTypeDefinition() == genericType)
+                            {
+                                derivesFromMapResource = true;
+                                break;
+                            }
+                        }
+
+                        if (!derivesFromMapResource)
+                        {
+                            continue;
+                        }
+
+                        MethodInfo? method = null;
+                        var methods = concreteType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        for (var methodIndex = 0; methodIndex < methods.Length; methodIndex++)
+                        {
+                            if (string.Equals(methods[methodIndex].Name, "GiveOrder", StringComparison.Ordinal)
+                                && methods[methodIndex].GetParameters().Length == 1)
+                            {
+                                method = methods[methodIndex];
+                                break;
+                            }
+                        }
+
+                        if (method == null || !patched.Add(method))
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            harmonyInstance.Patch(method, prefix: prefix);
+                            AppendPluginLog("Replication contextual GiveOrder prefix patched concrete="
+                                + (concreteType.FullName ?? concreteType.Name)
+                                + " declaring="
+                                + (method.DeclaringType?.FullName ?? string.Empty));
+                        }
+                        catch (Exception ex)
+                        {
+                            patched.Remove(method);
+                            AppendPluginLog("Replication contextual GiveOrder concrete patch failed type="
+                                + (concreteType.FullName ?? concreteType.Name)
+                                + " "
+                                + ex.GetType().Name
+                                + " "
+                                + ex.Message);
+                        }
+                    }
+                }
+
+                if (patched.Count == 0)
+                {
+                    AppendPluginLog("Replication contextual GiveOrder closed methods missing");
+                }
+
+                return patched.Count;
+            }
+            catch (Exception ex)
+            {
+                AppendPluginLog("Replication contextual GiveOrder patch failed "
+                    + ex.GetType().Name
+                    + " "
+                    + ex.Message);
+                return 0;
+            }
+        }
+
+        private static bool TryResolveReplicationContextualObjectGrid(
+            object target,
+            out int x,
+            out int y,
+            out int z,
+            out string detail)
+        {
+            if (TryReadReplicationWorldObjectGridPosition(target, out x, out y, out z))
+            {
+                detail = "source=target-grid-member";
+                return true;
+            }
+
+            // Building views are rendered in Unity world space with the map's
+            // vertical offset applied (for example world Y=15 for map Y=5).
+            // Region-order APIs expect the authoritative building grid position,
+            // so never fall through to the view transform when an instance exists.
+            if (TryResolveReplicationBuildingCandidateInstance(target, out var buildingInstance, out var instanceDetail)
+                && buildingInstance != null)
+            {
+                if (TryReadReplicationWorldObjectGridPosition(buildingInstance, out x, out y, out z))
+                {
+                    detail = "source=building-instance-grid " + instanceDetail;
+                    return true;
+                }
+
+                if (TryInvokeReplicationObjectMethod(buildingInstance, "GetGridPosition", out var gridPosition)
+                    && gridPosition != null
+                    && TryReadVec3IntLikeValue(gridPosition, out x, out y, out z))
+                {
+                    detail = "source=building-instance-GetGridPosition " + instanceDetail;
+                    return true;
+                }
+            }
+
+            if (target is Component component)
+            {
+                var position = component.transform.position;
+                x = (int)Math.Round(position.x);
+                // Region-order event payloads consume selection/world-space Y.
+                // World-object snapshots use map-space Y, but converting 15 -> 5
+                // here silently targets a different layer in PlantOrderEventData.
+                y = (int)Math.Round(position.y);
+                z = (int)Math.Round(position.z);
+                detail = "source=component-transform world=("
+                    + position.x.ToString("0.###", CultureInfo.InvariantCulture)
+                    + ","
+                    + position.y.ToString("0.###", CultureInfo.InvariantCulture)
+                    + ","
+                    + position.z.ToString("0.###", CultureInfo.InvariantCulture)
+                    + ")";
+                return true;
+            }
+
+            x = 0;
+            y = 0;
+            z = 0;
+            detail = "no-grid-or-component";
+            return false;
+        }
+
+        private int TryPatchReplicationContextualClosure(Harmony harmonyInstance, HarmonyMethod prefix, string methodName)
+        {
+            try
+            {
+                var closureType = AccessTools.TypeByName("NSMedieval.Manager.GlobalKeybindingManager+<>c");
+                if (closureType == null)
+                {
+                    AppendPluginLog("Replication contextual closure type missing method=" + methodName);
+                    return 0;
+                }
+
+                var method = closureType.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                if (method == null)
+                {
+                    AppendPluginLog("Replication contextual closure method missing: " + methodName);
+                    return 0;
+                }
+
+                harmonyInstance.Patch(method, prefix: prefix);
+                AppendPluginLog("Replication contextual closure prefix patched: "
+                    + (closureType.FullName ?? closureType.Name)
+                    + "."
+                    + methodName);
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                AppendPluginLog("Replication contextual closure patch failed method="
+                    + methodName
+                    + " "
+                    + ex.GetType().Name
+                    + " "
+                    + ex.Message);
+                return 0;
+            }
+        }
+
+        private static bool IsReplicationZoneModifyActive()
+        {
+            return !string.IsNullOrEmpty(replicationZoneModifyOperation)
+                && Time.realtimeSinceStartup - replicationZoneModifyRealtime < 30f;
+        }
+
+        private static string ResolveReplicationStockpileZoneId(object view)
+        {
+            object? stockpile = null;
+            TryReadInstanceMemberValue(view, "StockpileInstance", out stockpile);
+            if (stockpile == null)
+            {
+                TryReadInstanceMemberValue(view, "stockpileInstance", out stockpile);
+            }
+
+            if (stockpile != null)
+            {
+                var names = new[] { "UniqueId", "UniqueID", "ID", "Id", "id", "Guid", "guid" };
+                for (var i = 0; i < names.Length; i++)
+                {
+                    if (TryReadInstanceMemberValue(stockpile, names[i], out var value)
+                        && value != null
+                        && !string.IsNullOrWhiteSpace(value.ToString()))
+                    {
+                        return value.ToString() ?? string.Empty;
+                    }
+                }
+            }
+
+            return view is UnityEngine.Object unityObject
+                ? unityObject.GetInstanceID().ToString(CultureInfo.InvariantCulture)
+                : string.Empty;
         }
 
         private static void ReplicationRegionStockpileSpawnPostfix(MethodBase __originalMethod, object __0, object __1, object __2)
@@ -377,6 +1050,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool ReplicationRegionResourcePrefix(MethodBase __originalMethod, object __0)
         {
             if (!ShouldObserveReplicationRegionCommands()
+                || IsReplicationZoneModifyActive()
                 || !TryReadReplicationVec3Int(__0, out var x, out var y, out var z))
             {
                 return true;
@@ -415,6 +1089,11 @@ namespace GoingCooperative.Plugin.BepInEx
         private static void ReplicationRegionResourceSurfacePostfix(MethodBase __originalMethod, object __instance, object[] __args)
         {
             if (!ShouldObserveReplicationRegionCommands())
+            {
+                return;
+            }
+
+            if (IsReplicationZoneModifyActive())
             {
                 return;
             }

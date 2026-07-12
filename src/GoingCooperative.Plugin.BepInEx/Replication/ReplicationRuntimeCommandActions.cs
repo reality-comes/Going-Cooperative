@@ -12,6 +12,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using BepInEx;
 using GoingCooperative.Core;
+using GoingCooperative.Core.Replication;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -625,6 +626,286 @@ namespace GoingCooperative.Plugin.BepInEx
             catch (Exception ex)
             {
                 detail = FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+        }
+
+        private static bool TryInvokeSelectionManagerRegionAction(
+            string orderType,
+            int startX,
+            int startY,
+            int startZ,
+            int endX,
+            int endY,
+            int endZ,
+            out string detail)
+        {
+            try
+            {
+                var selectionManagerType = AccessTools.TypeByName("NSMedieval.Managers.Selection.SelectionManager");
+                if (selectionManagerType == null)
+                {
+                    detail = "selection-manager-type-missing";
+                    return false;
+                }
+
+                var selectionManager = ResolveReplicationUnityManagerInstance(selectionManagerType);
+                if (selectionManager == null)
+                {
+                    detail = "selection-manager-missing";
+                    return false;
+                }
+
+                var methodName = string.Equals(orderType, "Deconstruct", StringComparison.Ordinal)
+                    ? "OnOrderDeconstruction"
+                    : string.Equals(orderType, "Cancel", StringComparison.Ordinal)
+                        ? "OnOrderCancel"
+                        : string.Equals(orderType, "UrgentHaul", StringComparison.Ordinal)
+                            ? "OnOrderUrgentHaul"
+                            : string.Empty;
+                var action = AccessTools.Method(selectionManagerType, methodName, Type.EmptyTypes);
+                if (action == null)
+                {
+                    detail = "selection-action-method-missing orderType=" + (orderType ?? string.Empty) + " method=" + methodName;
+                    return false;
+                }
+
+                if (!TryCreateVec3Int(startX, startY, startZ, out var start, out detail)
+                    || !TryCreateVec3Int(endX, endY, endZ, out var end, out detail))
+                {
+                    return false;
+                }
+
+                var startField = AccessTools.Field(selectionManagerType, "startPoint");
+                var endField = AccessTools.Field(selectionManagerType, "endPoint");
+                if (startField == null || endField == null)
+                {
+                    detail = "selection-region-fields-missing orderType=" + (orderType ?? string.Empty);
+                    return false;
+                }
+
+                var previousStart = startField.GetValue(selectionManager);
+                var previousEnd = endField.GetValue(selectionManager);
+                try
+                {
+                    startField.SetValue(selectionManager, start);
+                    endField.SetValue(selectionManager, end);
+                    action.Invoke(selectionManager, null);
+                }
+                finally
+                {
+                    try
+                    {
+                        startField.SetValue(selectionManager, previousStart);
+                        endField.SetValue(selectionManager, previousEnd);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                detail = "ok via=SelectionManager."
+                    + methodName
+                    + " orderType="
+                    + orderType
+                    + " start=Vec3Int("
+                    + startX.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + startY.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + startZ.ToString(CultureInfo.InvariantCulture)
+                    + ") end=Vec3Int("
+                    + endX.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + endY.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + endZ.ToString(CultureInfo.InvariantCulture)
+                    + ")";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+        }
+
+        private static bool TryInvokeStockpileModifyRegionOrder(
+            string orderType,
+            int startX,
+            int startY,
+            int startZ,
+            int endX,
+            int endY,
+            int endZ,
+            string stockpileId,
+            out string detail)
+        {
+            try
+            {
+                var type = AccessTools.TypeByName("NSMedieval.Managers.Selection.SelectionManager");
+                var manager = type == null ? null : ResolveReplicationUnityManagerInstance(type);
+                if (type == null || manager == null)
+                {
+                    detail = "selection-manager-missing";
+                    return false;
+                }
+
+                var armName = string.Equals(orderType, "ShrinkZone", StringComparison.Ordinal) ? "ShrinkZone" : "ExpandZone";
+                var arm = AccessTools.Method(type, armName, new[] { typeof(string) });
+                var finish = AccessTools.Method(type, "ZoneSelectionFinished", Type.EmptyTypes);
+                var startField = AccessTools.Field(type, "startPoint");
+                var endField = AccessTools.Field(type, "endPoint");
+                if (arm == null || finish == null || startField == null || endField == null)
+                {
+                    detail = "stockpile-modify-surface-missing operation=" + armName;
+                    return false;
+                }
+
+                if (!TryCreateVec3Int(startX, startY, startZ, out var start, out detail)
+                    || !TryCreateVec3Int(endX, endY, endZ, out var end, out detail))
+                {
+                    return false;
+                }
+
+                var setupSelection = AccessTools.Method(type, "SetupSelectionObject", new[] { start.GetType(), end.GetType(), typeof(UnityEngine.GameObject), typeof(bool) });
+                if (setupSelection == null)
+                {
+                    detail = "stockpile-modify-setup-selection-missing operation=" + armName;
+                    return false;
+                }
+
+                var previousStart = startField.GetValue(manager);
+                var previousEnd = endField.GetValue(manager);
+                try
+                {
+                    arm.Invoke(manager, new object[] { stockpileId ?? string.Empty });
+                    startField.SetValue(manager, start);
+                    endField.SetValue(manager, end);
+                    setupSelection.Invoke(manager, new object?[] { start, end, null, true });
+                    finish.Invoke(manager, null);
+                }
+                finally
+                {
+                    try
+                    {
+                        startField.SetValue(manager, previousStart);
+                        endField.SetValue(manager, previousEnd);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                detail = "ok via=SelectionManager."
+                    + armName
+                    + "+SetupSelectionObject+ZoneSelectionFinished stockpileId="
+                    + (stockpileId ?? string.Empty)
+                    + " start=Vec3Int("
+                    + startX.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + startY.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + startZ.ToString(CultureInfo.InvariantCulture)
+                    + ") end=Vec3Int("
+                    + endX.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + endY.ToString(CultureInfo.InvariantCulture)
+                    + ","
+                    + endZ.ToString(CultureInfo.InvariantCulture)
+                    + ")";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+        }
+
+        private static bool TryApplyReplicationContextualPileAction(
+            string actionId,
+            int x,
+            int y,
+            int z,
+            out string detail)
+        {
+            var lookup = new ReplicationWorldObjectDelta(
+                0,
+                0f,
+                "ContextualPileAction",
+                0,
+                string.Empty,
+                x,
+                NormalizePossibleWorldY(y),
+                z,
+                string.Empty);
+            if (!TryFindReplicationResourcePile(lookup, out var pile, out var lookupDetail) || pile == null)
+            {
+                detail = "contextual-pile-missing actionId=" + (actionId ?? string.Empty) + " " + lookupDetail;
+                return false;
+            }
+
+            try
+            {
+                object actionTarget = pile;
+                var pileViewType = AccessTools.TypeByName("NSMedieval.Views.Resources.ResourcePileView");
+                if (pileViewType != null)
+                {
+                    var views = UnityEngine.Object.FindObjectsOfType(pileViewType);
+                    for (var viewIndex = 0; viewIndex < views.Length; viewIndex++)
+                    {
+                        var view = views[viewIndex];
+                        var instanceValue = AccessTools.Property(view.GetType(), "ResourcePileInstance")?.GetValue(view, null)
+                            ?? AccessTools.Field(view.GetType(), "resourcePileInstance")?.GetValue(view);
+                        if (ReferenceEquals(instanceValue, pile))
+                        {
+                            actionTarget = view;
+                            break;
+                        }
+                    }
+                }
+
+                var methodName = string.Equals(actionId, "UrgentHaul", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(actionId, "Cancel", StringComparison.OrdinalIgnoreCase)
+                        ? "UrgentHaulPile"
+                        : "ForbidPile";
+                var value = string.Equals(actionId, "Forbid", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(actionId, "UrgentHaul", StringComparison.OrdinalIgnoreCase);
+                var method = AccessTools.Method(actionTarget.GetType(), methodName, new[] { typeof(bool) })
+                    ?? FindCompatibleReplicationInstanceMethod(actionTarget.GetType(), methodName, typeof(bool));
+                if (method == null)
+                {
+                    detail = "contextual-pile-method-missing actionId="
+                        + (actionId ?? string.Empty)
+                        + " method="
+                        + methodName
+                        + " pileType="
+                        + (actionTarget.GetType().FullName ?? actionTarget.GetType().Name)
+                        + " "
+                        + lookupDetail;
+                    return false;
+                }
+
+                method.Invoke(actionTarget, new object[] { value });
+                detail = "ok contextual-pile actionId="
+                    + actionId
+                    + " method="
+                    + methodName
+                    + " value="
+                    + value
+                    + " "
+                    + lookupDetail;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = "contextual-pile-action-failed actionId="
+                    + (actionId ?? string.Empty)
+                    + " "
+                    + FormatReflectionExceptionDetail(ex)
+                    + " "
+                    + lookupDetail;
                 return false;
             }
         }

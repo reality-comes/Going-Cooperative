@@ -9,7 +9,8 @@ namespace GoingCooperative.Plugin.BepInEx
     {
         private void TryInstallReplicationHostRuntimePump(Harmony harmonyInstance)
         {
-            if (!replicationConfigEnabled || !replicationConfigHostMode)
+            if ((!replicationConfigEnabled && !replicationConfigMultiplayerMenuEnabled)
+                || (!replicationConfigMultiplayerMenuEnabled && !replicationConfigHostMode))
             {
                 return;
             }
@@ -47,6 +48,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 // CreatureManager updates once per frame. UpdateReplicationRuntime has its
                 // own frame guard, so this remains a single transport pump per frame.
                 current.UpdateReplicationRuntime();
+                current.UpdateMultiplayerCanvasGuiSafely();
             }
         }
     }

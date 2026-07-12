@@ -22,6 +22,25 @@ namespace GoingCooperative.Plugin.BepInEx
             string subType,
             out string detail)
         {
+            if (string.Equals(areaType, "InfoPanelAction", StringComparison.Ordinal)
+                && (string.Equals(subType, "Cancel", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(subType, "Deconstructing", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(orderType, "Deconstruct", StringComparison.OrdinalIgnoreCase))
+                && TryApplyReplicationContextualBuildingAction(orderType, subType, startX, startY, startZ, out detail))
+            {
+                return true;
+            }
+
+            if (string.Equals(areaType, "InfoPanelAction", StringComparison.Ordinal)
+                && (string.Equals(subType, "Forbid", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(subType, "Allow", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(subType, "UrgentHaul", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(subType, "Cancel", StringComparison.OrdinalIgnoreCase))
+                && TryApplyReplicationContextualPileAction(subType, startX, startY, startZ, out detail))
+            {
+                return true;
+            }
+
             if (string.Equals(orderType, "Digging", StringComparison.Ordinal))
             {
                 return TryInvokeGroundManagerOrderDigVoxel(startX, startY, startZ, endX, endY, endZ, out detail);
@@ -42,12 +61,40 @@ namespace GoingCooperative.Plugin.BepInEx
                 return TryInvokeStockpileSelectionManagerRegionOrderViaSelectionManager(startX, startY, startZ, endX, endY, endZ, subType, out detail);
             }
 
+            if (IsReplicationStockpileModifyRegionOrder(orderType))
+            {
+                return TryInvokeStockpileModifyRegionOrder(orderType, startX, startY, startZ, endX, endY, endZ, subType, out detail);
+            }
+
+            if (IsReplicationSelectionActionRegionOrder(orderType))
+            {
+                return TryInvokeSelectionManagerRegionAction(orderType, startX, startY, startZ, endX, endY, endZ, out detail);
+            }
+
             detail = "region-order-apply-shadow-only orderType=" + (orderType ?? string.Empty);
             return false;
         }
 
         bool IRuntimeCommandActions.ApplyCustom(string payloadJson, out string detail)
         {
+            if (LockstepCommandPayloads.TryReadResearchActivatePayload(payloadJson, out var nodeId))
+            {
+                return TryApplyReplicationResearchActivate(nodeId, out detail);
+            }
+
+            if (LockstepCommandPayloads.TryReadProductionQueuePayload(
+                payloadJson,
+                out var operation,
+                out var buildingX,
+                out var buildingY,
+                out var buildingZ,
+                out var ticketIndex,
+                out var productionBlueprintId,
+                out var value))
+            {
+                return TryApplyReplicationProductionQueue(operation, buildingX, buildingY, buildingZ, ticketIndex, productionBlueprintId, value, out detail);
+            }
+
             if (LockstepCommandPayloads.TryReadEquipOrderPayload(
                 payloadJson,
                 out var entityId,
@@ -86,12 +133,71 @@ namespace GoingCooperative.Plugin.BepInEx
                 || string.Equals(orderType, "Forbid", StringComparison.Ordinal);
         }
 
+        private static bool TryApplyReplicationContextualBuildingAction(
+            string orderType,
+            string subType,
+            int x,
+            int y,
+            int z,
+            out string detail)
+        {
+            if (!TryFindReplicationBuildingBlueprintCandidate(string.Empty, x, y, z, out var view, out var lookupDetail)
+                || view == null)
+            {
+                detail = "contextual-building-not-found " + lookupDetail;
+                return false;
+            }
+
+            var orderTypeEnum = AccessTools.TypeByName("NSMedieval.Types.OrderType");
+            var method = orderTypeEnum == null
+                ? null
+                : FindReplicationInstanceMethod(view.GetType(), "MarkForDeconstruction", new[] { orderTypeEnum });
+            if (method == null || method.GetParameters().Length != 1 || !method.GetParameters()[0].ParameterType.IsEnum)
+            {
+                detail = "contextual-building-method-missing viewType=" + (view.GetType().FullName ?? view.GetType().Name) + " " + lookupDetail;
+                return false;
+            }
+
+            var isDeconstruct = string.Equals(orderType, "Deconstruct", StringComparison.OrdinalIgnoreCase)
+                || subType.IndexOf("Deconstruct", StringComparison.OrdinalIgnoreCase) >= 0;
+            var nativeOrderValue = isDeconstruct ? 4 : 1;
+            try
+            {
+                method.Invoke(view, new[] { Enum.ToObject(method.GetParameters()[0].ParameterType, nativeOrderValue) });
+                detail = "ok via=BaseBuildingViewComponent.MarkForDeconstruction action="
+                    + (isDeconstruct ? "Deconstruct" : "Cancel")
+                    + " grid=Vec3Int(" + x.ToString(CultureInfo.InvariantCulture) + "," + y.ToString(CultureInfo.InvariantCulture) + "," + z.ToString(CultureInfo.InvariantCulture) + ") "
+                    + lookupDetail;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = "contextual-building-invoke-failed " + FormatReflectionExceptionDetail(ex) + " " + lookupDetail;
+                return false;
+            }
+        }
+
+        private static bool IsReplicationStockpileModifyRegionOrder(string orderType)
+        {
+            return string.Equals(orderType, "ExpandZone", StringComparison.Ordinal)
+                || string.Equals(orderType, "ShrinkZone", StringComparison.Ordinal);
+        }
+
+        private static bool IsReplicationSelectionActionRegionOrder(string orderType)
+        {
+            return string.Equals(orderType, "Deconstruct", StringComparison.Ordinal)
+                || string.Equals(orderType, "Cancel", StringComparison.Ordinal)
+                || string.Equals(orderType, "UrgentHaul", StringComparison.Ordinal);
+        }
+
         private static bool IsReplicationRegionOrderStateSupported(string orderType)
         {
             return IsReplicationDigRegionOrder(orderType)
                 || IsReplicationPlantRegionOrder(orderType)
                 || IsReplicationAllowForbidRegionOrder(orderType)
-                || IsReplicationStockpileRegionOrder(orderType);
+                || IsReplicationStockpileRegionOrder(orderType)
+                || IsReplicationStockpileModifyRegionOrder(orderType)
+                || IsReplicationSelectionActionRegionOrder(orderType);
         }
 
         private static bool IsReplicationMarkerRegionOrder(string orderType)

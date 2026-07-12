@@ -56,8 +56,8 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void TryInstallReplicationWorldObjectDeltaCapture(Harmony harmonyInstance)
         {
-            if (!replicationConfigEnabled
-                || !replicationConfigHostMode
+            if ((!replicationConfigEnabled && !replicationConfigMultiplayerMenuEnabled)
+                || (!replicationConfigMultiplayerMenuEnabled && !replicationConfigHostMode)
                 || IsReplicationWorldObjectDeltaModeOff())
             {
                 return;
@@ -952,6 +952,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     + " source=WorkerBehaviour.GoalUpdated "
                     + entityDetail);
             current.SendReplicationWorldObjectDelta(delta);
+            RecordReplicationNeedsGoalStatus(entityId, goalId, __1);
             lock (ReplicationWorldObjectDeltaLock)
             {
                 ReplicationAgentActionStatusByEntityId[entityId] = new ReplicationAgentActionStatus(
@@ -2562,6 +2563,12 @@ namespace GoingCooperative.Plugin.BepInEx
                 }
 
                 sent++;
+                var needsPayload = replicationConfigNeedsReplication
+                    ? " hasHunger=" + FormatReplicationBool(state.HasHunger)
+                        + " hungerCurrent=" + state.HungerCurrent.ToString("R", CultureInfo.InvariantCulture)
+                        + " hasSleep=" + FormatReplicationBool(state.HasSleep)
+                        + " sleepCurrent=" + state.SleepCurrent.ToString("R", CultureInfo.InvariantCulture)
+                    : string.Empty;
                 SendReplicationWorldObjectDelta(new ReplicationWorldObjectDelta(
                     ++replicationWorldObjectDeltaSequence,
                     Time.realtimeSinceStartup,
@@ -2599,6 +2606,7 @@ namespace GoingCooperative.Plugin.BepInEx
                         + FormatReplicationBool(state.IsDrafting)
                         + " combatB64="
                         + EncodeReplicationDetailBase64(state.CombatMode)
+                        + needsPayload
                         + " statsSig=0x"
                         + state.StatsSignature.ToString("X16", CultureInfo.InvariantCulture)
                         + " attrsSig=0x"
@@ -2751,6 +2759,13 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool ShouldSkipDuplicateReplicationWorldObjectDelta(ReplicationWorldObjectDelta delta)
         {
+            if (string.Equals(delta.DeltaKind, "AgentNeedLifecycle", StringComparison.Ordinal))
+            {
+                // Lifecycle phases may legitimately transition several times inside the
+                // generic 500 ms duplicate window (consume -> particles stop -> goal end).
+                return false;
+            }
+
             if (string.Equals(delta.DeltaKind, "AgentCarryResourceChanged", StringComparison.Ordinal)
                 && delta.Detail.IndexOf("inferred-amount-for=", StringComparison.Ordinal) >= 0)
             {
@@ -3317,6 +3332,11 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryApplyReplicationWorldObjectDelta(ReplicationWorldObjectDelta delta, out string detail)
         {
+            if (string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal))
+            {
+                return TryApplyReplicationManagementDelta(delta, out detail);
+            }
+
             if (!replicationConfigHostMode
                 && IsReplicationResourcePileStateSnapshotDelta(delta))
             {
@@ -3450,6 +3470,11 @@ namespace GoingCooperative.Plugin.BepInEx
             if (string.Equals(delta.DeltaKind, "AgentCharacterState", StringComparison.Ordinal))
             {
                 return TryApplyReplicationAgentCharacterStateDelta(delta, out detail);
+            }
+
+            if (string.Equals(delta.DeltaKind, "AgentNeedLifecycle", StringComparison.Ordinal))
+            {
+                return TryApplyReplicationNeedsLifecycleDelta(delta, out detail);
             }
 
             if (string.Equals(delta.DeltaKind, "GameTimeSnapshot", StringComparison.Ordinal))
@@ -4504,7 +4529,8 @@ namespace GoingCooperative.Plugin.BepInEx
                         continue;
                     }
 
-                    if (TryResolveReplicationBuildingCandidateBlueprintId(candidateObject, out var localBlueprintId)
+                    if (!string.IsNullOrWhiteSpace(blueprintId)
+                        && TryResolveReplicationBuildingCandidateBlueprintId(candidateObject, out var localBlueprintId)
                         && !string.IsNullOrWhiteSpace(localBlueprintId)
                         && !string.Equals(localBlueprintId, blueprintId, StringComparison.Ordinal))
                     {
@@ -4524,11 +4550,12 @@ namespace GoingCooperative.Plugin.BepInEx
                         return false;
                     }
 
+                    TryResolveReplicationBuildingCandidateBlueprintId(candidateObject, out var matchedBlueprintId);
                     candidate = candidateObject;
                     detail = "matched-existing-building scanned="
                         + scanned.ToString(CultureInfo.InvariantCulture)
                         + " blueprintId="
-                        + localBlueprintId
+                        + matchedBlueprintId
                         + " grid=Vec3Int("
                         + gridX.ToString(CultureInfo.InvariantCulture)
                         + ","
@@ -6297,6 +6324,10 @@ namespace GoingCooperative.Plugin.BepInEx
             var statsSignature = ComputeReplicationStatsCollectionSignature(statsOwner, "Stats");
             var attributesSignature = ComputeReplicationStatsCollectionSignature(statsOwner, "Attributes");
             var skillsSignature = ComputeReplicationSkillsSignature(skillsOwner);
+            var hungerCurrent = 0f;
+            var sleepCurrent = 0f;
+            var hasHunger = replicationConfigNeedsReplication && TryReadReplicationNeedsStat(statsOwner, "Hunger", out hungerCurrent);
+            var hasSleep = replicationConfigNeedsReplication && TryReadReplicationNeedsStat(statsOwner, "Sleep", out sleepCurrent);
             var signature = ComputeReplicationAgentCharacterStateSignature(
                 kind,
                 hasDied,
@@ -6309,6 +6340,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 isResting,
                 isDrafting,
                 combatMode,
+                hasHunger,
+                hasHunger ? hungerCurrent : 0f,
+                hasSleep,
+                hasSleep ? sleepCurrent : 0f,
                 statsSignature,
                 attributesSignature,
                 skillsSignature);
@@ -6327,6 +6362,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 isResting,
                 isDrafting,
                 combatMode,
+                hasHunger,
+                hasHunger ? hungerCurrent : 0f,
+                hasSleep,
+                hasSleep ? sleepCurrent : 0f,
                 statsSignature,
                 attributesSignature,
                 skillsSignature,
@@ -6604,6 +6643,10 @@ namespace GoingCooperative.Plugin.BepInEx
             bool isResting,
             bool isDrafting,
             string combatMode,
+            bool hasHunger,
+            float hungerCurrent,
+            bool hasSleep,
+            float sleepCurrent,
             ulong statsSignature,
             ulong attributesSignature,
             ulong skillsSignature)
@@ -6625,6 +6668,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 "attrs=0x" + attributesSignature.ToString("X16", CultureInfo.InvariantCulture),
                 "skills=0x" + skillsSignature.ToString("X16", CultureInfo.InvariantCulture)
             };
+            if (replicationConfigNeedsReplication)
+            {
+                values.Add("hasHunger=" + FormatReplicationBool(hasHunger));
+                values.Add("hunger=" + hungerCurrent.ToString("0.###", CultureInfo.InvariantCulture));
+                values.Add("hasSleep=" + FormatReplicationBool(hasSleep));
+                values.Add("sleep=" + sleepCurrent.ToString("0.###", CultureInfo.InvariantCulture));
+            }
             return ComputeReplicationStringListSignature("AgentCharacterState", values);
         }
 
@@ -9516,6 +9566,14 @@ namespace GoingCooperative.Plugin.BepInEx
             TryReadReplicationWorldObjectDetailHex(delta.Detail, "attrsSig", out var attributesSignature);
             TryReadReplicationWorldObjectDetailHex(delta.Detail, "skillsSig", out var skillsSignature);
             TryReadReplicationWorldObjectDetailHex(delta.Detail, "sig", out var signature);
+            TryReadReplicationWorldObjectDetailBool(delta.Detail, "hasHunger", out var hasHunger);
+            TryReadReplicationWorldObjectDetailBool(delta.Detail, "hasSleep", out var hasSleep);
+            var hungerCurrent = TryReadReplicationWorldObjectDetailFloat(delta.Detail, "hungerCurrent", out var parsedHunger)
+                ? parsedHunger
+                : 0f;
+            var sleepCurrent = TryReadReplicationWorldObjectDetailFloat(delta.Detail, "sleepCurrent", out var parsedSleep)
+                ? parsedSleep
+                : 0f;
             var state = new ReplicationAgentCharacterState(
                 entityId,
                 delta.UniqueId,
@@ -9530,6 +9588,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 isResting,
                 isDrafting,
                 combatMode,
+                hasHunger,
+                hungerCurrent,
+                hasSleep,
+                sleepCurrent,
                 statsSignature,
                 attributesSignature,
                 skillsSignature,
@@ -9538,6 +9600,12 @@ namespace GoingCooperative.Plugin.BepInEx
             lock (ReplicationWorldObjectDeltaLock)
             {
                 ReplicationClientAgentCharacterStateByEntityId[entityId] = state;
+            }
+
+            var needsDetail = "needs=gated-off";
+            if (replicationConfigNeedsReplication)
+            {
+                TryApplyReplicationNeedsRepair(entityId, hasHunger, hungerCurrent, hasSleep, sleepCurrent, isSleeping, out needsDetail);
             }
 
             detail = "ok agent-character-state-observed entityId="
@@ -9557,7 +9625,9 @@ namespace GoingCooperative.Plugin.BepInEx
                 + " skillsSig=0x"
                 + skillsSignature.ToString("X16", CultureInfo.InvariantCulture)
                 + " sig=0x"
-                + signature.ToString("X16", CultureInfo.InvariantCulture);
+                + signature.ToString("X16", CultureInfo.InvariantCulture)
+                + " "
+                + needsDetail;
             return true;
         }
 
@@ -12834,8 +12904,12 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 var animation = TryReadReplicationWorldObjectDetailToken(delta.Detail, "animation", out var parsedAnimation)
                     ? parsedAnimation
+                    : TryReadReplicationWorldObjectDetailToken(delta.Detail, "trigger", out var parsedTrigger)
+                        ? parsedTrigger
                     : string.Empty;
-                return FormatReplicationEntityWorldObjectDeltaCoalesceKey(delta)
+                return delta.DeltaKind
+                    + "|"
+                    + FormatReplicationEntityWorldObjectDeltaCoalesceKey(delta)
                     + "|animation="
                     + animation;
             }
@@ -13172,6 +13246,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 bool isResting,
                 bool isDrafting,
                 string combatMode,
+                bool hasHunger,
+                float hungerCurrent,
+                bool hasSleep,
+                float sleepCurrent,
                 ulong statsSignature,
                 ulong attributesSignature,
                 ulong skillsSignature,
@@ -13190,6 +13268,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 IsResting = isResting;
                 IsDrafting = isDrafting;
                 CombatMode = combatMode;
+                HasHunger = hasHunger;
+                HungerCurrent = hungerCurrent;
+                HasSleep = hasSleep;
+                SleepCurrent = sleepCurrent;
                 StatsSignature = statsSignature;
                 AttributesSignature = attributesSignature;
                 SkillsSignature = skillsSignature;
@@ -13221,6 +13303,14 @@ namespace GoingCooperative.Plugin.BepInEx
             public bool IsDrafting { get; }
 
             public string CombatMode { get; }
+
+            public bool HasHunger { get; }
+
+            public float HungerCurrent { get; }
+
+            public bool HasSleep { get; }
+
+            public float SleepCurrent { get; }
 
             public ulong StatsSignature { get; }
 

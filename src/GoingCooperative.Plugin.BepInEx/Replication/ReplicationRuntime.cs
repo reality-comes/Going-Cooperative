@@ -166,6 +166,11 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationLastRuntimeUpdateFrame = frame;
             UpdateReplicationPerfFpsProbe();
 
+            if (multiplayerLoadingInProgress)
+            {
+                return;
+            }
+
             TryStartReplicationRuntime();
             if (!replicationRuntimeStarted || replicationTransport == null)
             {
@@ -202,6 +207,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 TickReplicationHostDrivenGoapPlaybackAgents();
                 ProcessReplicationPuppetActionStates();
                 TickReplicationPuppetActionVisuals();
+                ProcessPendingReplicationNeedsRepairs();
             }
 
             LogReplicationStatusIfDue();
@@ -341,6 +347,8 @@ namespace GoingCooperative.Plugin.BepInEx
             ClearReplicationResourceContainerState();
             replicationVisualLocomotionByEntityId.Clear();
             replicationAnimatorParameterSupportByInstanceId.Clear();
+            ClearReplicationPresentationSmoothing();
+            ClearReplicationNeedsState();
             ClearReplicationGameTimeSyncCache();
         }
 
@@ -880,6 +888,7 @@ namespace GoingCooperative.Plugin.BepInEx
             SendReplicationCommandAck(command, result.Invoked, duplicate: false, detail: result.Detail);
             SendReplicationRegionOrderStateIfSupported(command, result);
             SendReplicationBuildBlueprintResultDeltaIfSupported(command, result);
+            SendReplicationManagementStateIfSupported(command, result);
 
             replicationLastIntentSummary = "host-applied invoked="
                 + (result.Invoked ? "yes" : "no")
@@ -1357,6 +1366,10 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 replicationPendingApplySnapshot = snapshot;
                 replicationPendingApplySnapshotReceivedRealtime = Time.realtimeSinceStartup;
+                if (replicationConfigSmoothReplicatedMovement)
+                {
+                    BufferReplicationTransformSnapshot(snapshot, replicationPendingApplySnapshotReceivedRealtime);
+                }
             }
             else
             {
@@ -1377,7 +1390,8 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var snapshot = replicationPendingApplySnapshot;
-            if (Time.realtimeSinceStartup - replicationPendingApplySnapshotReceivedRealtime > GetReplicationSnapshotVisualHoldSeconds())
+            if (!replicationConfigSmoothReplicatedMovement
+                && Time.realtimeSinceStartup - replicationPendingApplySnapshotReceivedRealtime > GetReplicationSnapshotVisualHoldSeconds())
             {
                 replicationPendingApplySnapshot = null;
                 return;
@@ -1385,7 +1399,9 @@ namespace GoingCooperative.Plugin.BepInEx
 
             replicationLastRenderApplyFrame = Time.frameCount;
             replicationLastAppliedSnapshotSequence = snapshot.Sequence;
-            replicationSnapshotsApplied += ApplyReplicationTransformSnapshot(snapshot);
+            replicationSnapshotsApplied += replicationConfigSmoothReplicatedMovement
+                ? ApplyBufferedReplicationTransformSnapshot(snapshot)
+                : ApplyReplicationTransformSnapshot(snapshot);
         }
 
         private static float GetReplicationSnapshotVisualHoldSeconds()

@@ -14,7 +14,9 @@ namespace GoingCooperative.Plugin.BepInEx
         private void TryInstallReplicationClientSimulationSuppression(Harmony harmonyInstance)
         {
             TryLoadReplicationConfig(this);
-            if (!replicationConfigEnabled || replicationConfigHostMode || !replicationConfigSuppressClientSimulation)
+            if ((!replicationConfigEnabled && !replicationConfigMultiplayerMenuEnabled)
+                || (!replicationConfigMultiplayerMenuEnabled
+                    && (replicationConfigHostMode || !replicationConfigSuppressClientSimulation)))
             {
                 return;
             }
@@ -68,7 +70,8 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool ShouldSuppressReplicationClientSimulation(MethodBase originalMethod)
         {
-            if (!replicationConfigEnabled
+            if (multiplayerLoadingInProgress
+                || !replicationConfigEnabled
                 || replicationConfigHostMode
                 || !replicationConfigApplySnapshots
                 || !replicationConfigSuppressClientSimulation)

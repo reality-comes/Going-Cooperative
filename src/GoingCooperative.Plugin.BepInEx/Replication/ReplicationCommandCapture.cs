@@ -16,7 +16,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private void TryInstallReplicationCommandCapture(Harmony harmonyInstance)
         {
             TryLoadReplicationConfig(this);
-            if (!replicationConfigEnabled)
+            if (!replicationConfigEnabled && !replicationConfigMultiplayerMenuEnabled)
             {
                 return;
             }
@@ -33,8 +33,9 @@ namespace GoingCooperative.Plugin.BepInEx
             var patchedCount = 0;
             patchedCount += TryPatchReplicationCommandCaptureMethod(harmonyInstance, instancePostfix, "NSMedieval.Manager.GameSpeedManager", "Start", Type.EmptyTypes);
             patchedCount += TryPatchReplicationCommandCaptureMethod(harmonyInstance, instancePostfix, "NSMedieval.Manager.GameSpeedManager", "OnUIInitComplete", Type.EmptyTypes);
+            patchedCount += TryInstallReplicationManagementCapture(harmonyInstance);
 
-            if (replicationConfigHostMode)
+            if (replicationConfigHostMode && !replicationConfigMultiplayerMenuEnabled)
             {
                 var hostRegionPatchCount = TryInstallReplicationRegionCommandCapture(harmonyInstance);
                 LogReplicationInfo("Going Cooperative replication host command/runtime capture patches="
