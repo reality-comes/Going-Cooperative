@@ -27,8 +27,7 @@ $pluginDirectory = Join-Path $stage "BepInEx\plugins\GoingCooperative"
 $configDirectory = Join-Path $stage "GoingCooperative"
 New-Item -ItemType Directory -Force -Path $pluginDirectory, $configDirectory | Out-Null
 Copy-Item -LiteralPath (Join-Path $artifactRoot "bin\Release\GoingCooperative.dll") -Destination $pluginDirectory
-Copy-Item -LiteralPath (Join-Path $repositoryRoot "config\replication-host.example.cfg") -Destination $configDirectory
-Copy-Item -LiteralPath (Join-Path $repositoryRoot "config\replication-client.example.cfg") -Destination $configDirectory
+Copy-Item -LiteralPath (Join-Path $repositoryRoot "config\replication.cfg") -Destination $configDirectory
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "LICENSE") -Destination $stage
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "README.md") -Destination $stage
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "THIRD-PARTY-NOTICES.md") -Destination $stage

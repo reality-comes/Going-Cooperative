@@ -16,6 +16,7 @@ winhttp.dll
 # Machine-specific runtime configuration
 GoingCooperative/replication.cfg
 replication.cfg
+!config/replication.cfg
 
 # Runtime logs, diagnostics, saves, and captures
 *.log

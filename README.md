@@ -76,8 +76,7 @@ Going Medieval\
 │       └── GoingCooperative\
 │           └── GoingCooperative.dll
 ├── GoingCooperative\
-│   ├── replication-host.example.cfg
-│   └── replication-client.example.cfg
+│   └── replication.cfg
 ├── doorstop_config.ini
 ├── winhttp.dll
 └── Going Medieval.exe
@@ -89,25 +88,19 @@ Do not leave the files inside an extra wrapper directory such as:
 Going Medieval\Going-Cooperative-v0.1.0\BepInEx\...
 ```
 
-### 4. Install the shared runtime configuration
+### 4. Shared runtime configuration
 
-Keep `Going Medieval\GoingCooperative\replication.cfg` on both computers. It
-stores the shared replication behavior and performance settings used by the
-current build. Both players can use the same baseline file.
+The release installs `Going Medieval\GoingCooperative\replication.cfg`
+automatically. The same file is used on every computer. Ordinary players do not
+need to create, rename, or edit it.
 
-For the menu-driven workflow, copy `replication-host.example.cfg` to
-`replication.cfg` on both computers. Despite the example filename, its role and
-endpoint values are only startup/fallback values once the Multiplayer menu is
-used; the menu changes them for the selected Host or Join session. This avoids
-requiring a client IP address in advance.
+It stores shared replication behavior and performance settings. The Multiplayer
+menu overrides host/client role, remote address, and port in memory for the
+selected session.
 
-The Multiplayer menu overrides the session-specific values in memory, including
-host/client role, remote address, and port. Players do not need to edit or swap
-configuration files before starting a session.
-
-The client example remains available for advanced config-driven testing and
-rollback. Setting `multiplayerMenu=false` restores that legacy workflow, where
-the separate host/client values matter again.
+Advanced users may edit this file for diagnostics or legacy config-driven
+testing. Setting `multiplayerMenu=false` restores that legacy workflow, where
+the values in the file are used directly.
 
 The required runtime files are the plugin DLL under
 `BepInEx\plugins\GoingCooperative` and the global settings file under
@@ -315,8 +308,7 @@ Upload `Going-Cooperative-v0.1.0.zip` as the player download under GitHub Releas
 
 ```text
 config\
-├── replication-host.example.cfg
-└── replication-client.example.cfg
+└── replication.cfg
 scripts\
 ├── Build.ps1
 └── Package-Release.ps1
