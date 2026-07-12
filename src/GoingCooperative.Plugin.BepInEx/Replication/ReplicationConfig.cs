@@ -30,6 +30,8 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigNativeAnimationControllerReplay;
         private static bool replicationConfigActionAnimatorStateSampling;
         private static bool replicationConfigAnimateReplicatedMovement = true;
+        private static bool replicationConfigSmoothReplicatedMovement = true;
+        private static bool replicationConfigNeedsReplication = true;
         private static bool replicationConfigForceHostMovement;
         private static bool replicationConfigSendSnapshots = true;
         private static bool replicationConfigLogSnapshots = true;
@@ -40,7 +42,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigCharacterStateDiagnostics;
         private static bool replicationConfigCarryDiagnostics;
         private static bool replicationConfigGoapActionProbe;
-        private static bool replicationConfigMultiplayerMenuEnabled;
+        private static bool replicationConfigMultiplayerMenuEnabled = true;
         private static bool replicationConfigPerfFpsProbe = true;
         private static bool replicationConfigResourcePileStateSnapshots;
         private static bool replicationConfigResourceContainerReplication;
@@ -139,6 +141,12 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigActionAnimatorStateSampling
                     + " animateReplicatedMovement="
                     + replicationConfigAnimateReplicatedMovement
+                    + " smoothReplicatedMovement="
+                    + replicationConfigSmoothReplicatedMovement
+                    + " needsReplication="
+                    + replicationConfigNeedsReplication
+                    + " interpolationMs="
+                    + replicationConfigInterpolationMs.ToString(CultureInfo.InvariantCulture)
                     + " forceHostMovement="
                     + replicationConfigForceHostMovement
                     + " validateSnapshots="
@@ -275,6 +283,32 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var interpolationMs) && interpolationMs >= 0 && interpolationMs <= 5000)
                     {
                         replicationConfigInterpolationMs = interpolationMs;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "smoothreplicatedmovement":
+                case "smoothmovement":
+                case "snapshotinterpolation":
+                    if (TryParseConfigBool(value, out var smoothReplicatedMovement))
+                    {
+                        replicationConfigSmoothReplicatedMovement = smoothReplicatedMovement;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "needsreplication":
+                case "hungersleepreplication":
+                case "needsync":
+                    if (TryParseConfigBool(value, out var needsReplication))
+                    {
+                        replicationConfigNeedsReplication = needsReplication;
                     }
                     else
                     {

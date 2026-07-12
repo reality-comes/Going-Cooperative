@@ -14,8 +14,6 @@ namespace GoingCooperative.Plugin.BepInEx
     public sealed partial class GoingCooperativePlugin : BaseUnityPlugin, IRuntimeCommandActions
     {
         private static GoingCooperativePlugin? instance;
-        private static ReplicationRuntimeDriver? replicationRuntimeDriver;
-
         private RuntimeCommandExecutor? runtimeCommandExecutor;
         private Harmony? harmony;
         private string? diagnosticDirectory;
@@ -44,7 +42,7 @@ namespace GoingCooperative.Plugin.BepInEx
             AppendPluginLog("Going Cooperative replication plugin loaded version=" + GoingCooperativeConstants.Version);
 
             harmony = new Harmony(GoingCooperativeConstants.ModId);
-            if (replicationConfigEnabled)
+            if (replicationConfigEnabled || replicationConfigMultiplayerMenuEnabled)
             {
                 TryInstallReplicationCommandCapture(harmony);
                 TryInstallReplicationHostRuntimePump(harmony);
@@ -53,8 +51,9 @@ namespace GoingCooperative.Plugin.BepInEx
                 TryInstallReplicationGoapActionProbe(harmony);
                 TryInstallReplicationWorldObjectDeltaCapture(harmony);
                 TryInstallReplicationWorldObjectDeltaClientHooks(harmony);
+                TryInstallReplicationNeedsHooks(harmony);
                 TryInstallReplicationResultLifecycleProbes(harmony);
-                EnsureReplicationRuntimeDriver();
+                TryInstallMultiplayerUiLifecyclePatches(harmony);
             }
 
             Camera.onPreCull += OnReplicationCameraPreCull;
@@ -71,9 +70,14 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             if (replicationConfigMultiplayerMenuEnabled)
             {
-                DrawReplicationMultiplayerMenuGui();
+                // Going Medieval does not dispatch OnGUI reliably to the BaseUnityPlugin
+                // component. The persistent runtime driver owns the replacement surface.
+                return;
             }
 
+            // Rollback path: multiplayerMenu=false preserves the original config-driven
+            // runtime and client-only resync control exactly as it behaved before the
+            // replacement menu was introduced.
             DrawReplicationResyncControlGui();
         }
 
@@ -95,6 +99,7 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             Camera.onPreCull -= OnReplicationCameraPreCull;
+            multiplayerSaveTransfer.Dispose();
             StopReplicationRuntime();
             if (harmony != null)
             {
@@ -127,19 +132,6 @@ namespace GoingCooperative.Plugin.BepInEx
             }
         }
 
-        private void EnsureReplicationRuntimeDriver()
-        {
-            if (replicationRuntimeDriver != null)
-            {
-                return;
-            }
-
-            var driverObject = new GameObject("Going Cooperative Replication Runtime Driver");
-            DontDestroyOnLoad(driverObject);
-            replicationRuntimeDriver = driverObject.AddComponent<ReplicationRuntimeDriver>();
-            AppendPluginLog("Going Cooperative replication persistent runtime driver created.");
-        }
-
         private static RuntimeCommandResult ApplyRuntimeCommand(GoingCooperativePlugin current, LockstepCommand command)
         {
             if (current.runtimeCommandExecutor == null)
@@ -155,29 +147,6 @@ namespace GoingCooperative.Plugin.BepInEx
                 + " "
                 + FormatRuntimeCommandSummary(command));
             return result;
-        }
-
-        private sealed class ReplicationRuntimeDriver : MonoBehaviour
-        {
-            private void Update()
-            {
-                var current = instance;
-                if (ReferenceEquals(current, null))
-                {
-                    return;
-                }
-
-                current.UpdateReplicationRuntime();
-                current.FlushPluginLogBufferIfDue(force: false);
-            }
-
-            private void OnDestroy()
-            {
-                if (ReferenceEquals(replicationRuntimeDriver, this))
-                {
-                    replicationRuntimeDriver = null;
-                }
-            }
         }
 
         private static string FormatRuntimeCommandSummary(LockstepCommand command)

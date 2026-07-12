@@ -88,72 +88,19 @@ Do not leave the files inside an extra wrapper directory such as:
 Going Medieval\Going-Cooperative-v0.1.0\BepInEx\...
 ```
 
-### 4. Create the active configuration
+### 4. Global settings, not session setup
 
-Going Cooperative reads exactly this path:
+`Going Medieval\GoingCooperative\replication.cfg` stores global replication and
+diagnostic settings. In the menu-driven workflow it should not contain `mode`,
+`host`, or `port`: role, remote address, and session port are selected in the UI
+for each session.
 
-```text
-Going Medieval\GoingCooperative\replication.cfg
-```
+The shipped host/client examples remain available for legacy config-driven
+testing and rollback. Setting `multiplayerMenu=false` restores that old behavior.
 
-Choose one configuration for each computer.
-
-#### Host
-
-From the Going Medieval directory, run:
-
-```powershell
-Copy-Item `
-  ".\GoingCooperative\replication-host.example.cfg" `
-  ".\GoingCooperative\replication.cfg"
-```
-
-The important host settings are:
-
-```ini
-enabled=true
-mode=host
-host=0.0.0.0
-port=47692
-```
-
-The host listens on UDP port `47692`; the `host` value is not used in host mode.
-
-#### Client
-
-From the Going Medieval directory, run:
-
-```powershell
-Copy-Item `
-  ".\GoingCooperative\replication-client.example.cfg" `
-  ".\GoingCooperative\replication.cfg"
-```
-
-Open `GoingCooperative\replication.cfg` and replace:
-
-```ini
-host=HOST_IP_ADDRESS
-```
-
-with the host computer's reachable LAN or VPN address, for example:
-
-```ini
-host=192.168.1.52
-```
-
-Do not use the client's own address, and do not leave `HOST_IP_ADDRESS` unchanged.
-
-The final runtime layout on both computers should be:
-
-```text
-Going Medieval\
-├── BepInEx\
-│   └── plugins\
-│       └── GoingCooperative\
-│           └── GoingCooperative.dll
-└── GoingCooperative\
-    └── replication.cfg
-```
+The required runtime files are the plugin DLL under
+`BepInEx\plugins\GoingCooperative` and the global settings file under
+`GoingCooperative`.
 
 ### 5. Configure the network
 
@@ -161,17 +108,55 @@ On the host computer:
 
 1. Permit Going Medieval through Windows Firewall.
 2. Permit inbound UDP traffic on port `47692`.
-3. Make sure clients can reach the address used in their `host=` setting.
-4. Use the same `port=` value on every computer.
+3. Enter the host computer's reachable LAN/VPN address in the Join screen.
+4. Use the same port in the Host and Join screens.
 
 For play outside the same local network, a private VPN is usually simpler than router port forwarding.
 
 ### 6. Start a session
 
-1. Start Going Medieval on the host.
-2. Load the intended settlement/save on the host.
-3. Start Going Medieval on each client.
-4. Load a compatible copy of the same settlement/save on each client.
+The replacement multiplayer menu is enabled by default. Select the remapped
+**Multiplayer** main-menu button or press `F8`:
+
+1. On the host, open **Host Game**, confirm the UDP port, and select **Start Hosting**.
+2. On the client, open **Join Game**, enter the host's reachable LAN/VPN address,
+   and select **Connect**.
+3. Wait for **Connected** and **Compatible peer verified** on both computers.
+4. Load compatible copies of the same settlement/save on both computers.
+
+The test menu changes Host/Client role and restarts the replication transport
+without creating or editing a session configuration. Session values are kept in
+memory for the current process.
+
+Set the following value to disable the replacement menu and restore the original
+config-driven runtime and client resync overlay:
+
+```ini
+multiplayerMenu=false
+```
+
+Save transfer, LAN discovery, and automatic save loading are not implemented in
+this test version. The Status page labels resync as a control-path test rather
+than implying that save transfer is complete.
+
+### Multiplayer UI test functions
+
+With `multiplayerMenu=true`, use the remapped **Multiplayer** main-menu button.
+
+- **Test Save Transfer** on the Host page runs a safe visual test through
+  manifest creation, chunk transfer, SHA-256 verification, quarantine staging,
+  and completion. It uses a synthetic 32 MiB payload model and never reads,
+  writes, replaces, or loads a user save.
+- **Test Resync Flow** on the Status page presents the equivalent checkpoint
+  transfer and reload-required sequence without invoking the game save loader.
+- **Request Resync** is available to a running client. It sends the real existing
+  resync-control request to the host and displays the network response; the host
+  currently reports that save export/load integration is blocked.
+
+After starting a Host or Client runtime and entering gameplay, a compact
+multiplayer HUD appears in the upper-right with connection state, role, current
+test phase, an **Open** action, and a client **Resync** action. The HUD is hidden
+on the main menu. Press `F8` at any time as a fallback way to open the full panel.
 
 ## Verify the installation
 
