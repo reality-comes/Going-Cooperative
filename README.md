@@ -85,7 +85,7 @@ Going Medieval\
 Do not leave the files inside an extra wrapper directory such as:
 
 ```text
-Going Medieval\Going-Cooperative-v0.1.0\BepInEx\...
+Going Medieval\Going-Cooperative-v0.2.0\BepInEx\...
 ```
 
 ### 4. Shared runtime configuration
@@ -188,7 +188,7 @@ BepInEx\GoingCooperative\plugin.log
 A successful startup should include messages similar to:
 
 ```text
-Going Cooperative replication plugin loaded version=0.1.0
+Going Cooperative replication plugin loaded version=0.2.0
 Going Cooperative replication runtime started mode=host
 ```
 
@@ -280,7 +280,7 @@ Run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\Package-Release.ps1 `
-  -Version 0.1.0 `
+  -Version 0.2.0 `
   -GameRoot "C:\Path\To\Going Medieval"
 ```
 
@@ -289,20 +289,20 @@ Replace the example game path with the directory containing `Going Medieval.exe`
 The packaging script will compile the plugin, stage the player-facing directory structure, create the ZIP, and calculate its SHA-256 checksum:
 
 ```text
-artifacts\Going-Cooperative-v0.1.0.zip
-artifacts\Going-Cooperative-v0.1.0.zip.sha256
+artifacts\Going-Cooperative-v0.2.0.zip
+artifacts\Going-Cooperative-v0.2.0.zip.sha256
 ```
 
 If BepInEx is stored outside the game directory, pass its `core` directory explicitly:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\Package-Release.ps1 `
-  -Version 0.1.0 `
+  -Version 0.2.0 `
   -GameRoot "C:\Path\To\Going Medieval" `
   -BepInExRoot "C:\Path\To\BepInEx\core"
 ```
 
-Upload `Going-Cooperative-v0.1.0.zip` as the player download under GitHub Release **Assets**. The `.sha256` file may be uploaded beside it for integrity verification.
+Upload `Going-Cooperative-v0.2.0.zip` as the player download under GitHub Release **Assets**. The `.sha256` file may be uploaded beside it for integrity verification.
 
 ## Repository layout
 
