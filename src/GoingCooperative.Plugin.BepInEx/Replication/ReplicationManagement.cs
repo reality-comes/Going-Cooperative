@@ -25,8 +25,153 @@ namespace GoingCooperative.Plugin.BepInEx
             count += PatchManagementMethod(harmony, "NSMedieval.UI.ProductionLayoutItemView", "ChangeQuantity", new[] { typeof(int) }, nameof(ReplicationProductionTicketPrefix), nameof(ReplicationProductionTicketPostfix));
             count += PatchManagementMethod(harmony, "NSMedieval.UI.ProductionLayoutItemView", "OnTogglePauseProductionButtonPress", Type.EmptyTypes, nameof(ReplicationProductionTicketPrefix), nameof(ReplicationProductionTicketPostfix));
             count += PatchProductionRemovalMethod(harmony);
+            count += PatchManagementMethodByArity(harmony, "NSMedieval.UI.SelectionExtraStockpile", "OnResourceToggleChangeCallback", 2, nameof(ReplicationStockpileResourcePrefix), nameof(ReplicationStockpilePolicyPostfix));
+            count += PatchManagementMethod(harmony, "NSMedieval.UI.SelectionExtraStockpile", "OnPriorityChanged", Type.EmptyTypes, nameof(ReplicationStockpilePriorityPrefix), nameof(ReplicationStockpilePolicyPostfix));
+            var jobType = AccessTools.TypeByName("NSMedieval.State.WorkerJobs.JobType");
+            if (jobType != null)
+            {
+                count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerJobManager", "OnPriorityAdd", new[] { jobType, typeof(int), typeof(bool) }, nameof(ReplicationWorkerJobPrefix), nameof(ReplicationManagementPolicyPostfix));
+                count += PatchManagementMethod(harmony, "NSMedieval.State.WorkerBehaviour", "ModifyJobPriority", new[] { jobType, typeof(int), typeof(bool) }, nameof(ReplicationWorkerJobModelPrefix), nameof(ReplicationWorkerJobModelPostfix));
+            }
+            var hourType = AccessTools.TypeByName("NSMedieval.Goap.HourType");
+            var soundButton = AccessTools.TypeByName("NSEipix.View.UI.SoundButton");
+            if (hourType != null && soundButton != null) count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerScheduleManager", "ChangeHourType", new[] { soundButton, hourType }, nameof(ReplicationWorkerScheduleButtonPrefix), nameof(ReplicationManagementPolicyPostfix));
+            var animalOrderType = AccessTools.TypeByName("NSMedieval.Types.AnimalOrderType");
+            var animalInstance = AccessTools.TypeByName("NSMedieval.State.AnimalInstance");
+            if (animalOrderType != null && animalInstance != null) count += PatchManagementMethod(harmony, "NSMedieval.Controllers.AnimalController", "MarkForOrder", new[] { animalOrderType, animalInstance }, nameof(ReplicationAnimalOrderPrefix), nameof(ReplicationAnimalOrderPostfix));
             LogReplicationInfo("Going Cooperative replication management capture patches=" + count.ToString(CultureInfo.InvariantCulture));
             return count;
+        }
+
+        private int PatchManagementMethodByArity(Harmony harmony, string typeName, string methodName, int arity, string prefixName, string postfixName)
+        {
+            var type = AccessTools.TypeByName(typeName);
+            MethodInfo? method = null;
+            if (type != null) foreach (var candidate in type.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                if (candidate.Name == methodName && candidate.GetParameters().Length == arity) { method = candidate; break; }
+            var prefix = typeof(GoingCooperativePlugin).GetMethod(prefixName, BindingFlags.Static | BindingFlags.NonPublic);
+            var postfix = typeof(GoingCooperativePlugin).GetMethod(postfixName, BindingFlags.Static | BindingFlags.NonPublic);
+            if (method == null || prefix == null || postfix == null) { LogReplicationWarning("Going Cooperative replication management arity patch missing " + typeName + "." + methodName); return 0; }
+            try { harmony.Patch(method, new HarmonyMethod(prefix), new HarmonyMethod(postfix)); return 1; }
+            catch (Exception ex) { LogReplicationWarning("Going Cooperative replication management arity patch failed " + typeName + "." + methodName + " " + ex.Message); return 0; }
+        }
+
+        private static bool ReplicationWorkerJobPrefix(object __instance, object __0, int __1, bool __2, ref string? __state)
+        {
+            __state = null;
+            if (IsReplicationRegionOrderStateCaptureSuppressed()) return true;
+            if (!TryGetWorkerPanelHumanoid(__instance, out var humanoid) || humanoid == null
+                || !TryGetReplicationAgentOwnerEntityId(humanoid, out var entityId, out _)) return true;
+            __state = LockstepCommandPayloads.CreateManagementPolicyPayload("WorkerJob", entityId, __0.ToString() ?? string.Empty, 0, __1, __2);
+            if (ShouldSendReplicationLocalCommandIntent()) SendReplicationManagementIntent(__state, "worker-job");
+            return true;
+        }
+
+        private static void ReplicationWorkerJobModelPrefix(object __instance, object __0, int __1, bool __2, ref string? __state)
+        {
+            __state = null;
+            if (!replicationConfigHostMode || IsReplicationRegionOrderStateCaptureSuppressed()) return;
+            var humanoid = AccessTools.Property(__instance.GetType(), "Humanoid")?.GetValue(__instance, null);
+            if (humanoid == null || !TryGetReplicationAgentOwnerEntityId(humanoid, out var entityId, out _)) return;
+            __state = LockstepCommandPayloads.CreateManagementPolicyPayload(
+                "WorkerJob",
+                entityId,
+                __0.ToString() ?? string.Empty,
+                0,
+                __1,
+                __2);
+        }
+
+        private static void ReplicationWorkerJobModelPostfix(string? __state)
+        {
+            BroadcastHostManagementMutation(__state, "worker-job-model");
+        }
+
+        private static bool ReplicationAnimalOrderPrefix(object __0, object __1, ref string? __state)
+        {
+            __state = null;
+            if (IsReplicationRegionOrderStateCaptureSuppressed()) return true;
+            var order = __0?.ToString() ?? string.Empty;
+            if (!string.Equals(order, "Hunt", StringComparison.Ordinal)
+                && !string.Equals(order, "None", StringComparison.Ordinal)) return true;
+            if (__1 == null || !TryGetReplicationAgentOwnerEntityId(__1, out var entityId, out _)) return true;
+            __state = LockstepCommandPayloads.CreateManagementPolicyPayload("AnimalOrder", entityId, order, 0, Convert.ToInt32(__0, CultureInfo.InvariantCulture), true);
+            if (ShouldSendReplicationLocalCommandIntent())
+            {
+                SendReplicationManagementIntent(__state, "animal-order:" + order);
+                return false;
+            }
+            return true;
+        }
+
+        private static void ReplicationAnimalOrderPostfix(string? __state)
+        {
+            BroadcastHostManagementMutation(__state, "animal-order-model");
+        }
+
+        private static bool ReplicationWorkerScheduleButtonPrefix(object __instance, object __0, object __1, ref string? __state)
+        {
+            __state = null;
+            if (IsReplicationRegionOrderStateCaptureSuppressed()) return true;
+            if (!TryGetWorkerPanelHumanoid(__instance, out var humanoid) || humanoid == null
+                || !TryGetReplicationAgentOwnerEntityId(humanoid, out var entityId, out _)) return true;
+            if (!TryGetListMember(__instance, "hourButtons", out var hourButtons)) return true;
+            var hour = hourButtons.IndexOf(__0);
+            if (hour < 0) return true;
+            __state = LockstepCommandPayloads.CreateManagementPolicyPayload("WorkerSchedule", entityId, __1.ToString() ?? string.Empty, hour, Convert.ToInt32(__1, CultureInfo.InvariantCulture), true);
+            if (ShouldSendReplicationLocalCommandIntent()) SendReplicationManagementIntent(__state, "worker-schedule");
+            return true;
+        }
+
+        private static void ReplicationManagementPolicyPostfix(string? __state)
+        {
+            // Worker jobs retransmit from WorkerBehaviour.ModifyJobPriority so every
+            // host mutation path is covered. Do not also echo the surrounding UI call.
+            if (!string.IsNullOrWhiteSpace(__state)
+                && LockstepCommandPayloads.TryReadManagementPolicyPayload(__state, out var policy, out _, out _, out _, out _, out _)
+                && string.Equals(policy, "WorkerJob", StringComparison.Ordinal)) return;
+            BroadcastHostManagementMutation(__state, "management-policy-local");
+        }
+
+        private static bool TryGetWorkerPanelHumanoid(object manager, out object? humanoid)
+        {
+            humanoid = AccessTools.Property(manager.GetType(), "Humanoid")?.GetValue(manager, null);
+            if (humanoid != null) return true;
+            for (var current = manager.GetType(); current != null; current = current.BaseType)
+            {
+                var property = current.GetProperty("Humanoid", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (property != null && (humanoid = property.GetValue(manager, null)) != null) return true;
+            }
+            return false;
+        }
+
+        private static bool ReplicationStockpileResourcePrefix(object __instance, object __0, bool __1, ref string? __state)
+        {
+            __state = null;
+            if (IsReplicationRegionOrderStateCaptureSuppressed()) return true;
+            if (!TryGetSelectedStockpileObjectId(__instance, out var objectId, out _)
+                || !TryResolveReplicationModelId(__0, out var resourceId)) return true;
+            __state = LockstepCommandPayloads.CreateManagementPolicyPayload("StockpileResource", objectId, resourceId, 0, 0, __1);
+            if (ShouldSendReplicationLocalCommandIntent()) SendReplicationManagementIntent(__state, "stockpile-resource:" + resourceId);
+            return true;
+        }
+
+        private static bool ReplicationStockpilePriorityPrefix(object __instance, ref string? __state)
+        {
+            __state = null;
+            if (IsReplicationRegionOrderStateCaptureSuppressed()) return true;
+            if (!TryGetSelectedStockpileObjectId(__instance, out var objectId, out _)
+                || !TryReadInstanceMemberValue(__instance, "priorityDropdown", out var dropdown) || dropdown == null
+                || !TryReadInstanceMemberValue(dropdown, "value", out var raw) || raw == null) return true;
+            var priority = Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+            __state = LockstepCommandPayloads.CreateManagementPolicyPayload("StockpilePriority", objectId, string.Empty, 0, priority, true);
+            if (ShouldSendReplicationLocalCommandIntent()) SendReplicationManagementIntent(__state, "stockpile-priority");
+            return true;
+        }
+
+        private static void ReplicationStockpilePolicyPostfix(string? __state)
+        {
+            BroadcastHostManagementMutation(__state, "stockpile-policy-local");
         }
 
         private int PatchProductionRemovalMethod(Harmony harmony)
@@ -239,7 +384,8 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             if (result.Invoked && command.Kind == CommandKind.Custom
                 && (LockstepCommandPayloads.TryReadResearchActivatePayload(command.PayloadJson, out _)
-                    || LockstepCommandPayloads.TryReadProductionQueuePayload(command.PayloadJson, out _, out _, out _, out _, out _, out _, out _)))
+                    || LockstepCommandPayloads.TryReadProductionQueuePayload(command.PayloadJson, out _, out _, out _, out _, out _, out _, out _)
+                    || LockstepCommandPayloads.TryReadManagementPolicyPayload(command.PayloadJson, out _, out _, out _, out _, out _, out _)))
             {
                 SendReplicationManagementDelta(command.PayloadJson, "accepted-command");
             }
@@ -247,26 +393,126 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryApplyReplicationManagementDelta(ReplicationWorldObjectDelta delta, out string detail)
         {
-            if (LockstepCommandPayloads.TryReadResearchActivatePayload(delta.Detail, out var nodeId))
+            BeginReplicationRegionOrderStateCaptureSuppression();
+            try
             {
-                return TryApplyReplicationResearchActivate(nodeId, out detail);
-            }
+                if (LockstepCommandPayloads.TryReadResearchActivatePayload(delta.Detail, out var nodeId))
+                {
+                    return TryApplyReplicationResearchActivate(nodeId, out detail);
+                }
 
-            if (LockstepCommandPayloads.TryReadProductionQueuePayload(
-                delta.Detail,
-                out var operation,
-                out var buildingX,
-                out var buildingY,
-                out var buildingZ,
-                out var ticketIndex,
-                out var blueprintId,
-                out var value))
+                if (LockstepCommandPayloads.TryReadProductionQueuePayload(
+                    delta.Detail,
+                    out var operation,
+                    out var buildingX,
+                    out var buildingY,
+                    out var buildingZ,
+                    out var ticketIndex,
+                    out var blueprintId,
+                    out var value))
+                {
+                    return TryApplyReplicationProductionQueue(operation, buildingX, buildingY, buildingZ, ticketIndex, blueprintId, value, out detail);
+                }
+
+                if (LockstepCommandPayloads.TryReadManagementPolicyPayload(delta.Detail, out var policy, out var targetId, out var key, out var index, out var policyValue, out var enabled))
+                {
+                    return TryApplyReplicationManagementPolicy(policy, targetId, key, index, policyValue, enabled, out detail);
+                }
+
+                detail = "management-payload-unsupported";
+                return false;
+            }
+            finally
             {
-                return TryApplyReplicationProductionQueue(operation, buildingX, buildingY, buildingZ, ticketIndex, blueprintId, value, out detail);
+                EndReplicationRegionOrderStateCaptureSuppression();
             }
+        }
 
-            detail = "management-payload-unsupported";
-            return false;
+        private static bool TryApplyReplicationManagementPolicy(string policy, string targetId, string key, int index, int value, bool enabled, out string detail)
+        {
+            if (string.Equals(policy, "AnimalOrder", StringComparison.Ordinal))
+            {
+                if (!TryFindReplicationAnimatedAgentViewByEntityId(targetId, out var view, out var animalLookup) || view == null)
+                { detail = "animal-order-target-missing " + animalLookup; return false; }
+                var animal = AccessTools.Property(view.GetType(), "AnimalInstance")?.GetValue(view, null)
+                    ?? AccessTools.Field(view.GetType(), "animalInstance")?.GetValue(view);
+                var controllerType = AccessTools.TypeByName("NSMedieval.Controllers.AnimalController");
+                var controller = controllerType == null ? null : ResolveReplicationUnityManagerInstance(controllerType);
+                var method = controllerType == null ? null : AccessTools.Method(controllerType, "MarkForOrder");
+                if (animal == null || controller == null || method == null)
+                { detail = "animal-order-surface-missing " + animalLookup; return false; }
+                var nativeOrder = Enum.ToObject(method.GetParameters()[0].ParameterType, value);
+                method.Invoke(controller, new[] { nativeOrder, animal });
+                detail = "ok animal-order entityId=" + targetId + " order=" + key + " " + animalLookup;
+                return true;
+            }
+            if (string.Equals(policy, "WorkerSchedule", StringComparison.Ordinal))
+            {
+                if (!TryFindReplicationAgentOwnerByEntityId(targetId, out var humanoid, out var workerLookup) || humanoid == null)
+                { detail = "worker-schedule-target-missing " + workerLookup; return false; }
+                var method = AccessTools.Method(humanoid.GetType(), "ChangeSchedule");
+                if (method == null) { detail = "worker-schedule-method-missing"; return false; }
+                var hourType = Enum.ToObject(method.GetParameters()[1].ParameterType, value);
+                method.Invoke(humanoid, new[] { (object)index, hourType });
+                detail = "ok worker-schedule entityId=" + targetId + " hour=" + index + " type=" + key; return true;
+            }
+            if (string.Equals(policy, "WorkerJob", StringComparison.Ordinal))
+            {
+                if (!TryFindReplicationAgentOwnerByEntityId(targetId, out var humanoid, out var workerLookup) || humanoid == null)
+                { detail = "worker-job-target-missing " + workerLookup; return false; }
+                var behaviour = AccessTools.Property(humanoid.GetType(), "WorkerBehaviour")?.GetValue(humanoid, null);
+                var method = behaviour == null ? null : AccessTools.Method(behaviour.GetType(), "ModifyJobPriority");
+                if (behaviour == null || method == null) { detail = "worker-job-behaviour-or-method-missing"; return false; }
+                object jobType;
+                try { jobType = Enum.Parse(method.GetParameters()[0].ParameterType, key, true); }
+                catch { detail = "worker-job-type-invalid type=" + key; return false; }
+                method.Invoke(behaviour, new[] { jobType, (object)value, (object)enabled });
+                detail = "ok worker-job entityId=" + targetId + " type=" + key + " priority=" + value + " active=" + enabled; return true;
+            }
+            if (!TryResolveReplicationStockpileInstanceByObjectId(targetId, out var stockpile, out var lookup) || stockpile == null)
+            { detail = "stockpile-policy-target-missing " + lookup; return false; }
+            if (string.Equals(policy, "StockpilePriority", StringComparison.Ordinal))
+            {
+                var method = AccessTools.Method(stockpile.GetType(), "SetPriority");
+                if (method == null) { detail = "stockpile-priority-method-missing"; return false; }
+                method.Invoke(stockpile, new[] { Enum.ToObject(method.GetParameters()[0].ParameterType, value) });
+                detail = "ok stockpile-priority objectId=" + targetId + " value=" + value; return true;
+            }
+            if (string.Equals(policy, "StockpileResource", StringComparison.Ordinal))
+            {
+                var resource = TryResolveRepositoryItem("NSMedieval.Repository.ResourceRepository", key);
+                var method = resource == null ? null : AccessTools.Method(stockpile.GetType(), "AllowResource", new[] { resource.GetType(), typeof(bool) });
+                if (resource == null || method == null) { detail = "stockpile-resource-or-method-missing resourceId=" + key; return false; }
+                method.Invoke(stockpile, new[] { resource, (object)enabled });
+                detail = "ok stockpile-resource objectId=" + targetId + " resourceId=" + key + " allowed=" + enabled; return true;
+            }
+            detail = "management-policy-unsupported policy=" + policy; return false;
+        }
+
+        private static bool TryGetSelectedStockpileObjectId(object selection, out string objectId, out string detail)
+        {
+            objectId = string.Empty;
+            if (!TryGetListMember(selection, "storageObjects", out var storages) || storages.Count != 1 || storages[0] == null)
+            { detail = "stockpile-selection-not-single"; return false; }
+            var storage = storages[0]!;
+            var value = AccessTools.Property(storage.GetType(), "ObjectId")?.GetValue(storage, null);
+            objectId = Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+            var start = AccessTools.Property(storage.GetType(), "Start")?.GetValue(storage, null);
+            if (start != null && TryReadReplicationVec3Int(start, out var x, out var y, out var z))
+                objectId += "@" + x.ToString(CultureInfo.InvariantCulture) + "," + y.ToString(CultureInfo.InvariantCulture) + "," + z.ToString(CultureInfo.InvariantCulture);
+            detail = objectId.Length == 0 ? "stockpile-objectId-empty" : "ok";
+            return objectId.Length > 0;
+        }
+
+        private static object? TryResolveRepositoryItem(string markerTypeName, string id)
+        {
+            var marker = AccessTools.TypeByName(markerTypeName);
+            var model = markerTypeName.IndexOf("ResourceRepository", StringComparison.Ordinal) >= 0 ? AccessTools.TypeByName("NSMedieval.Model.Resource") : null;
+            var definition = AccessTools.TypeByName("NSEipix.Repository.Repository`2");
+            if (marker == null || model == null || definition == null) return null;
+            var type = definition.MakeGenericType(marker, model);
+            var repo = AccessTools.Property(type, "Instance")?.GetValue(null, null);
+            return repo == null ? null : AccessTools.Method(type, "GetByID", new[] { typeof(string) })?.Invoke(repo, new object[] { id });
         }
 
         private static bool TryApplyReplicationResearchActivate(string nodeId, out string detail)

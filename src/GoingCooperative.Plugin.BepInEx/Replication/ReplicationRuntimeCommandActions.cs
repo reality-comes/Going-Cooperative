@@ -743,22 +743,19 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             try
             {
-                var type = AccessTools.TypeByName("NSMedieval.Managers.Selection.SelectionManager");
-                var manager = type == null ? null : ResolveReplicationUnityManagerInstance(type);
-                if (type == null || manager == null)
+                var stockpileManagerType = AccessTools.TypeByName("NSMedieval.Stockpiles.StockpileManager");
+                var stockpileManager = stockpileManagerType == null ? null : ResolveReplicationUnityManagerInstance(stockpileManagerType);
+                var armName = string.Equals(orderType, "ShrinkZone", StringComparison.Ordinal) ? "ShrinkZone" : "ExpandZone";
+                if (stockpileManagerType == null || stockpileManager == null)
                 {
-                    detail = "selection-manager-missing";
+                    detail = "stockpile-modify-manager-missing";
                     return false;
                 }
 
-                var armName = string.Equals(orderType, "ShrinkZone", StringComparison.Ordinal) ? "ShrinkZone" : "ExpandZone";
-                var arm = AccessTools.Method(type, armName, new[] { typeof(string) });
-                var finish = AccessTools.Method(type, "ZoneSelectionFinished", Type.EmptyTypes);
-                var startField = AccessTools.Field(type, "startPoint");
-                var endField = AccessTools.Field(type, "endPoint");
-                if (arm == null || finish == null || startField == null || endField == null)
+                if (!TryResolveReplicationStockpileInstanceByObjectId(stockpileId, out var stockpileInstance, out var stockpileLookup)
+                    || stockpileInstance == null)
                 {
-                    detail = "stockpile-modify-surface-missing operation=" + armName;
+                    detail = "stockpile-modify-target-missing stockpileId=" + (stockpileId ?? string.Empty) + " " + stockpileLookup;
                     return false;
                 }
 
@@ -768,39 +765,33 @@ namespace GoingCooperative.Plugin.BepInEx
                     return false;
                 }
 
-                var setupSelection = AccessTools.Method(type, "SetupSelectionObject", new[] { start.GetType(), end.GetType(), typeof(UnityEngine.GameObject), typeof(bool) });
-                if (setupSelection == null)
+                var shrinking = string.Equals(orderType, "ShrinkZone", StringComparison.Ordinal);
+                var validName = shrinking ? "GetShrinkValidPositions" : "GetExpandValidPositions";
+                var mutateName = shrinking ? "ShrinkStockpile" : "ExpandStockpile";
+                var getValid = AccessTools.Method(stockpileManagerType, validName, new[] { start.GetType(), end.GetType() });
+                var validPositions = getValid?.Invoke(stockpileManager, new[] { start, end });
+                MethodInfo? mutate = null;
+                foreach (var candidate in stockpileManagerType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
                 {
-                    detail = "stockpile-modify-setup-selection-missing operation=" + armName;
+                    if (candidate.Name == mutateName && candidate.GetParameters().Length == 4)
+                    {
+                        mutate = candidate;
+                        break;
+                    }
+                }
+                if (getValid == null || validPositions == null || mutate == null)
+                {
+                    detail = "stockpile-modify-direct-surface-missing operation=" + armName;
                     return false;
                 }
+                mutate.Invoke(stockpileManager, new[] { stockpileInstance, start, end, validPositions });
 
-                var previousStart = startField.GetValue(manager);
-                var previousEnd = endField.GetValue(manager);
-                try
-                {
-                    arm.Invoke(manager, new object[] { stockpileId ?? string.Empty });
-                    startField.SetValue(manager, start);
-                    endField.SetValue(manager, end);
-                    setupSelection.Invoke(manager, new object?[] { start, end, null, true });
-                    finish.Invoke(manager, null);
-                }
-                finally
-                {
-                    try
-                    {
-                        startField.SetValue(manager, previousStart);
-                        endField.SetValue(manager, previousEnd);
-                    }
-                    catch
-                    {
-                    }
-                }
-
-                detail = "ok via=SelectionManager."
-                    + armName
-                    + "+SetupSelectionObject+ZoneSelectionFinished stockpileId="
+                detail = "ok via=StockpileManager."
+                    + mutateName
+                    + " valid=" + (validPositions is ICollection collection ? collection.Count.ToString(CultureInfo.InvariantCulture) : "unknown")
+                    + " stockpileId="
                     + (stockpileId ?? string.Empty)
+                    + " target=" + stockpileLookup
                     + " start=Vec3Int("
                     + startX.ToString(CultureInfo.InvariantCulture)
                     + ","
@@ -821,6 +812,127 @@ namespace GoingCooperative.Plugin.BepInEx
                 detail = FormatReflectionExceptionDetail(ex);
                 return false;
             }
+        }
+
+        private static bool TryInvokeFishingRegionOrder(
+            string orderType,
+            int startX,
+            int startY,
+            int startZ,
+            int endX,
+            int endY,
+            int endZ,
+            out string detail)
+        {
+            try
+            {
+                var viewType = AccessTools.TypeByName("NSMedieval.View.Resources.FishMapResourceView");
+                if (viewType == null)
+                {
+                    detail = "fishing-view-type-missing";
+                    return false;
+                }
+
+                var cancelling = string.Equals(orderType, "Cancel", StringComparison.Ordinal);
+                var methodName = cancelling ? "CancelOrder" : "GiveOrder";
+                var orderTypeEnum = AccessTools.TypeByName("NSMedieval.Types.OrderType");
+                var method = orderTypeEnum == null ? null : FindReplicationMethodOnTypeOrBase(viewType, methodName, new[] { orderTypeEnum });
+                if (method == null || method.GetParameters().Length != 1 || !method.GetParameters()[0].ParameterType.IsEnum)
+                {
+                    detail = "fishing-order-method-missing method=" + methodName;
+                    return false;
+                }
+
+                var nativeName = cancelling ? "Fishing" : "Fishing";
+                object nativeOrder;
+                try { nativeOrder = Enum.Parse(method.GetParameters()[0].ParameterType, nativeName, true); }
+                catch
+                {
+                    detail = "fishing-native-order-missing";
+                    return false;
+                }
+
+                var minX = Math.Min(startX, endX);
+                var maxX = Math.Max(startX, endX);
+                var minY = Math.Min(startY, endY);
+                var maxY = Math.Max(startY, endY);
+                var minMapY = Math.Min(NormalizePossibleWorldY(startY), NormalizePossibleWorldY(endY));
+                var maxMapY = Math.Max(NormalizePossibleWorldY(startY), NormalizePossibleWorldY(endY));
+                var minZ = Math.Min(startZ, endZ);
+                var maxZ = Math.Max(startZ, endZ);
+                var views = UnityEngine.Object.FindObjectsOfType(viewType);
+                var matched = 0;
+                var invoked = 0;
+                for (var i = 0; i < views.Length; i++)
+                {
+                    var view = views[i];
+                    var resource = AccessTools.Property(view.GetType(), "ResourceInstance")?.GetValue(view, null)
+                        ?? AccessTools.Field(view.GetType(), "resourceInstance")?.GetValue(view);
+                    if (resource == null || !TryGetListMember(resource, "Positions", out var positions)) continue;
+                    var inside = false;
+                    for (var positionIndex = 0; positionIndex < positions.Count; positionIndex++)
+                    {
+                        var position = positions[positionIndex];
+                        if (position != null && TryReadReplicationVec3Int(position, out var x, out var y, out var z)
+                            && x >= minX && x <= maxX
+                            && ((y >= minY && y <= maxY) || (y >= minMapY && y <= maxMapY))
+                            && z >= minZ && z <= maxZ)
+                        {
+                            inside = true;
+                            break;
+                        }
+                    }
+                    if (!inside) continue;
+                    matched++;
+                    method.Invoke(view, new[] { nativeOrder });
+                    invoked++;
+                }
+
+                detail = "ok fishing operation=" + (cancelling ? "cancel" : "designate")
+                    + " matched=" + matched.ToString(CultureInfo.InvariantCulture)
+                    + " invoked=" + invoked.ToString(CultureInfo.InvariantCulture)
+                    + " region=Vec3Int(" + minX.ToString(CultureInfo.InvariantCulture) + "," + minY.ToString(CultureInfo.InvariantCulture) + "," + minZ.ToString(CultureInfo.InvariantCulture) + ")-Vec3Int("
+                    + maxX.ToString(CultureInfo.InvariantCulture) + "," + maxY.ToString(CultureInfo.InvariantCulture) + "," + maxZ.ToString(CultureInfo.InvariantCulture) + ")";
+                return invoked > 0;
+            }
+            catch (Exception ex)
+            {
+                detail = "fishing-order-failed " + FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+        }
+
+        private static bool TryResolveReplicationStockpileInstanceByObjectId(string objectId, out object? stockpileInstance, out string detail)
+        {
+            stockpileInstance = null;
+            var identityParts = (objectId ?? string.Empty).Split('@');
+            var expectedId = identityParts[0];
+            var hasAnchor = identityParts.Length == 2;
+            var expectedAnchor = hasAnchor ? identityParts[1] : string.Empty;
+            var viewType = AccessTools.TypeByName("NSMedieval.Stockpiles.StockpileView");
+            if (viewType == null) { detail = "stockpile-view-type-missing"; return false; }
+            var views = UnityEngine.Object.FindObjectsOfType(viewType);
+            for (var i = 0; i < views.Length; i++)
+            {
+                var view = views[i];
+                var candidate = AccessTools.Property(view.GetType(), "StockpileInstance")?.GetValue(view, null)
+                    ?? AccessTools.Field(view.GetType(), "stockpileInstance")?.GetValue(view);
+                if (candidate == null) continue;
+                var candidateId = Convert.ToString(AccessTools.Property(candidate.GetType(), "ObjectId")?.GetValue(candidate, null), CultureInfo.InvariantCulture) ?? string.Empty;
+                var anchor = string.Empty;
+                if (TryReadInstanceMemberValue(candidate, "Start", out var start) && start != null
+                    && TryReadReplicationVec3Int(start, out var x, out var y, out var z))
+                    anchor = x.ToString(CultureInfo.InvariantCulture) + "," + y.ToString(CultureInfo.InvariantCulture) + "," + z.ToString(CultureInfo.InvariantCulture);
+                if (string.Equals(candidateId, expectedId, StringComparison.Ordinal)
+                    && (!hasAnchor || string.Equals(anchor, expectedAnchor, StringComparison.Ordinal)))
+                {
+                    stockpileInstance = candidate;
+                    detail = "matched-objectId scanned=" + (i + 1).ToString(CultureInfo.InvariantCulture);
+                    return true;
+                }
+            }
+            detail = "stockpile-objectId-not-found scanned=" + views.Length.ToString(CultureInfo.InvariantCulture);
+            return false;
         }
 
         private static bool TryApplyReplicationContextualPileAction(

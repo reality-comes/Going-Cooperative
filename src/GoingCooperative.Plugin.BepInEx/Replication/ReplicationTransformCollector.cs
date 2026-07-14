@@ -142,6 +142,14 @@ namespace GoingCooperative.Plugin.BepInEx
             var transform = behaviour.transform;
             var position = transform.position;
             var rotation = transform.rotation;
+            ReplicationEntityMotionMetadata? motion = null;
+            if (replicationConfigSemanticAgentPresentation
+                && hasStableEntityId
+                && TryCollectReplicationSemanticMotionMetadata(view, behaviour, entityId, kind, out var capturedMotion))
+            {
+                motion = capturedMotion;
+            }
+
             AppendReplicationPositionSample(positionSample, kind, entityId, position);
             entities.Add(new ReplicationEntityTransform(
                 entityId,
@@ -152,7 +160,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 rotation.x,
                 rotation.y,
                 rotation.z,
-                        rotation.w));
+                rotation.w,
+                motion));
         }
 
         private static void UpdateReplicationCollectionSummary(int entities, int stableIds, int fallbackIds, string fallbackSample, string positionSample)
@@ -224,6 +233,9 @@ namespace GoingCooperative.Plugin.BepInEx
         }
 
         private static Type? replicationAnimatedAgentViewType;
+        private static UnityEngine.Object[] replicationSemanticAnimatedAgentViewCache = Array.Empty<UnityEngine.Object>();
+        private static float replicationSemanticAnimatedAgentViewCacheRealtime = -10f;
+        private const float ReplicationSemanticAnimatedAgentViewCacheSeconds = 0.75f;
 
         private static UnityEngine.Object[] FindReplicationAnimatedAgentViews()
         {
@@ -233,7 +245,20 @@ namespace GoingCooperative.Plugin.BepInEx
                 return Array.Empty<UnityEngine.Object>();
             }
 
-            return UnityEngine.Object.FindObjectsOfType(type) ?? Array.Empty<UnityEngine.Object>();
+            if (!replicationConfigSemanticAgentPresentation)
+            {
+                return UnityEngine.Object.FindObjectsOfType(type) ?? Array.Empty<UnityEngine.Object>();
+            }
+
+            var now = Time.realtimeSinceStartup;
+            if (now - replicationSemanticAnimatedAgentViewCacheRealtime < ReplicationSemanticAnimatedAgentViewCacheSeconds)
+            {
+                return replicationSemanticAnimatedAgentViewCache;
+            }
+
+            replicationSemanticAnimatedAgentViewCache = UnityEngine.Object.FindObjectsOfType(type) ?? Array.Empty<UnityEngine.Object>();
+            replicationSemanticAnimatedAgentViewCacheRealtime = now;
+            return replicationSemanticAnimatedAgentViewCache;
         }
 
         private static bool TryClassifyReplicationView(object view, out string kind)
@@ -637,7 +662,9 @@ namespace GoingCooperative.Plugin.BepInEx
                 if (TryReadInstanceMemberValue(owner, memberNames[i], out var value)
                     && value != null
                     && TryFormatSimpleValue(value, value.GetType(), out var simple)
-                    && !string.IsNullOrWhiteSpace(simple))
+                    && !string.IsNullOrWhiteSpace(simple)
+                    && (!long.TryParse(simple, NumberStyles.Integer, CultureInfo.InvariantCulture, out var numericId)
+                        || numericId != 0L))
                 {
                     entityId = "uid:" + simple;
                     return true;

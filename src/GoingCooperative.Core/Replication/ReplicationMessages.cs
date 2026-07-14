@@ -169,6 +169,86 @@ namespace GoingCooperative.Core.Replication
         public string Detail { get; }
     }
 
+    public readonly struct ReplicationEntityMotionMetadata
+    {
+        public const string WireVersion = "agent-presentation-v1";
+        public const string WireToken = "m1";
+
+        public ReplicationEntityMotionMetadata(
+            float velocityX,
+            float velocityY,
+            float velocityZ,
+            float movementSpeed,
+            ReplicationAgentLocomotionGait gait,
+            bool isMoving,
+            bool isRunning,
+            bool isSwimming,
+            bool isClimbing,
+            int climbDirection,
+            float animatorSpeed,
+            long pathRevision)
+        {
+            RequireFinite(velocityX, nameof(velocityX));
+            RequireFinite(velocityY, nameof(velocityY));
+            RequireFinite(velocityZ, nameof(velocityZ));
+            RequireFinite(movementSpeed, nameof(movementSpeed));
+            RequireFinite(animatorSpeed, nameof(animatorSpeed));
+            if (movementSpeed < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(movementSpeed));
+            }
+
+            if (animatorSpeed < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(animatorSpeed));
+            }
+
+            if (!Enum.IsDefined(typeof(ReplicationAgentLocomotionGait), gait))
+            {
+                throw new ArgumentOutOfRangeException(nameof(gait));
+            }
+
+            if (pathRevision < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(pathRevision));
+            }
+
+            VelocityX = velocityX;
+            VelocityY = velocityY;
+            VelocityZ = velocityZ;
+            MovementSpeed = movementSpeed;
+            Gait = gait;
+            IsMoving = isMoving;
+            IsRunning = isRunning;
+            IsSwimming = isSwimming;
+            IsClimbing = isClimbing;
+            ClimbDirection = climbDirection;
+            AnimatorSpeed = animatorSpeed;
+            PathRevision = pathRevision;
+        }
+
+        public float VelocityX { get; }
+        public float VelocityY { get; }
+        public float VelocityZ { get; }
+        public float MovementSpeed { get; }
+        public ReplicationAgentLocomotionGait Gait { get; }
+        public bool IsMoving { get; }
+        public bool IsRunning { get; }
+        public bool IsSwimming { get; }
+        public bool IsClimbing { get; }
+        public int ClimbDirection { get; }
+        public float AnimatorSpeed { get; }
+        public long PathRevision { get; }
+
+        private static void RequireFinite(float value, string parameterName)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value))
+            {
+                throw new ArgumentOutOfRangeException(parameterName);
+            }
+        }
+    }
+
     public sealed class ReplicationEntityTransform
     {
         public ReplicationEntityTransform(
@@ -181,6 +261,31 @@ namespace GoingCooperative.Core.Replication
             float rotationY,
             float rotationZ,
             float rotationW)
+            : this(
+                entityId,
+                kind,
+                positionX,
+                positionY,
+                positionZ,
+                rotationX,
+                rotationY,
+                rotationZ,
+                rotationW,
+                null)
+        {
+        }
+
+        public ReplicationEntityTransform(
+            string entityId,
+            string kind,
+            float positionX,
+            float positionY,
+            float positionZ,
+            float rotationX,
+            float rotationY,
+            float rotationZ,
+            float rotationW,
+            ReplicationEntityMotionMetadata? motion)
         {
             EntityId = entityId ?? throw new ArgumentNullException(nameof(entityId));
             Kind = kind ?? throw new ArgumentNullException(nameof(kind));
@@ -191,6 +296,7 @@ namespace GoingCooperative.Core.Replication
             RotationY = rotationY;
             RotationZ = rotationZ;
             RotationW = rotationW;
+            Motion = motion;
         }
 
         public string EntityId { get; }
@@ -202,6 +308,7 @@ namespace GoingCooperative.Core.Replication
         public float RotationY { get; }
         public float RotationZ { get; }
         public float RotationW { get; }
+        public ReplicationEntityMotionMetadata? Motion { get; }
     }
 
     public sealed class ReplicationTransformSnapshot

@@ -41,7 +41,7 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 5)
             {
                 error = "expected hello payload with 5 fields";
@@ -102,7 +102,7 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 10)
             {
                 error = "expected command intent payload with 10 fields";
@@ -177,7 +177,7 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 6)
             {
                 error = "expected command ack payload with 6 fields";
@@ -247,7 +247,7 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 14)
             {
                 error = "expected region order state payload with 14 fields";
@@ -334,7 +334,7 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 10)
             {
                 error = "expected world object delta payload with 10 fields";
@@ -408,7 +408,7 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 5)
             {
                 error = "expected world object delta ack payload with 5 fields";
@@ -472,7 +472,7 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 9)
             {
                 error = "expected resync control payload with 9 fields";
@@ -549,7 +549,7 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 5)
             {
                 error = "expected transform snapshot payload with 5 fields";
@@ -572,7 +572,7 @@ namespace GoingCooperative.Core.Replication
             var entities = new List<ReplicationEntityTransform>(Math.Max(0, expectedCount));
             if (parts[4].Length > 0)
             {
-                var entityParts = parts[4].Split(';');
+                var entityParts = parts[4].Split(new[] { ';' }, StringSplitOptions.None);
                 for (var i = 0; i < entityParts.Length; i++)
                 {
                     if (!TryReadEntity(entityParts[i], out var entity, out error) || entity == null)
@@ -659,7 +659,7 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 6
                 || !ValidateProtocol(parts[0], out error)
                 || !long.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var sequence)
@@ -679,10 +679,10 @@ namespace GoingCooperative.Core.Replication
             var containers = new List<ReplicationResourceContainerState>(expectedCount);
             if (parts[5].Length > 0)
             {
-                var encodedContainers = parts[5].Split(';');
+                var encodedContainers = parts[5].Split(new[] { ';' }, StringSplitOptions.None);
                 for (var i = 0; i < encodedContainers.Length; i++)
                 {
-                    var fields = encodedContainers[i].Split(',');
+                    var fields = encodedContainers[i].Split(new[] { ',' }, StringSplitOptions.None);
                     if (fields.Length != 9
                         || !TryDecodeText(fields[0], out var containerId, out error)
                         || !TryDecodeText(fields[1], out var containerKind, out error)
@@ -705,10 +705,10 @@ namespace GoingCooperative.Core.Replication
                     var entries = new List<ReplicationResourceContainerEntry>(expectedEntries);
                     if (fields[8].Length > 0)
                     {
-                        var encodedEntries = fields[8].Split('~');
+                        var encodedEntries = fields[8].Split(new[] { '~' }, StringSplitOptions.None);
                         for (var entryIndex = 0; entryIndex < encodedEntries.Length; entryIndex++)
                         {
-                            var entryFields = encodedEntries[entryIndex].Split(':');
+                            var entryFields = encodedEntries[entryIndex].Split(new[] { ':' }, StringSplitOptions.None);
                             if (entryFields.Length != 2
                                 || !TryDecodeText(entryFields[0], out var blueprintId, out error)
                                 || !int.TryParse(entryFields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var amount)
@@ -773,16 +773,38 @@ namespace GoingCooperative.Core.Replication
                 .Append(entity.RotationZ.ToString("R", CultureInfo.InvariantCulture))
                 .Append(',')
                 .Append(entity.RotationW.ToString("R", CultureInfo.InvariantCulture));
+
+            var motion = entity.Motion;
+            if (!motion.HasValue)
+            {
+                return;
+            }
+
+            var motionValue = motion.Value;
+            var flags = (motionValue.IsMoving ? 1 : 0)
+                | (motionValue.IsRunning ? 2 : 0)
+                | (motionValue.IsSwimming ? 4 : 0)
+                | (motionValue.IsClimbing ? 8 : 0);
+            builder.Append(',').Append(ReplicationEntityMotionMetadata.WireToken).Append(',')
+                .Append(motionValue.VelocityX.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+                .Append(motionValue.VelocityY.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+                .Append(motionValue.VelocityZ.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+                .Append(motionValue.MovementSpeed.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+                .Append(((int)motionValue.Gait).ToString(CultureInfo.InvariantCulture)).Append(',')
+                .Append(flags.ToString(CultureInfo.InvariantCulture)).Append(',')
+                .Append(motionValue.ClimbDirection.ToString(CultureInfo.InvariantCulture)).Append(',')
+                .Append(motionValue.AnimatorSpeed.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+                .Append(motionValue.PathRevision.ToString(CultureInfo.InvariantCulture));
         }
 
         private static bool TryReadEntity(string encoded, out ReplicationEntityTransform? entity, out string error)
         {
             entity = null;
             error = string.Empty;
-            var parts = encoded.Split(',');
-            if (parts.Length != 9)
+            var parts = encoded.Split(new[] { ',' }, StringSplitOptions.None);
+            if (parts.Length != 9 && parts.Length != 19)
             {
-                error = "expected 9 entity fields";
+                error = "expected 9 legacy entity fields or semantic motion metadata";
                 return false;
             }
 
@@ -799,6 +821,59 @@ namespace GoingCooperative.Core.Replication
                 return false;
             }
 
+            ReplicationEntityMotionMetadata? motion = null;
+            if (parts.Length > 9)
+            {
+                if (!string.Equals(parts[9], ReplicationEntityMotionMetadata.WireToken, StringComparison.Ordinal)
+                    || !TryParseFloat(parts[10], out var velocityX, out error)
+                    || !TryParseFloat(parts[11], out var velocityY, out error)
+                    || !TryParseFloat(parts[12], out var velocityZ, out error)
+                    || !TryParseFloat(parts[13], out var movementSpeed, out error)
+                    || movementSpeed < 0
+                    || !int.TryParse(parts[14], NumberStyles.Integer, CultureInfo.InvariantCulture, out var gaitValue)
+                    || !Enum.IsDefined(typeof(ReplicationAgentLocomotionGait), gaitValue)
+                    || !int.TryParse(parts[15], NumberStyles.Integer, CultureInfo.InvariantCulture, out var flags)
+                    || flags < 0
+                    || (flags & ~15) != 0
+                    || !int.TryParse(parts[16], NumberStyles.Integer, CultureInfo.InvariantCulture, out var climbDirection)
+                    || !TryParseFloat(parts[17], out var animatorSpeed, out error)
+                    || animatorSpeed < 0
+                    || !long.TryParse(parts[18], NumberStyles.Integer, CultureInfo.InvariantCulture, out var pathRevision)
+                    || pathRevision < 0)
+                {
+                    if (string.IsNullOrEmpty(error))
+                    {
+                        error = "invalid semantic entity motion metadata";
+                    }
+
+                    return false;
+                }
+
+                if (!IsFinite(velocityX)
+                    || !IsFinite(velocityY)
+                    || !IsFinite(velocityZ)
+                    || !IsFinite(movementSpeed)
+                    || !IsFinite(animatorSpeed))
+                {
+                    error = "semantic entity motion values must be finite";
+                    return false;
+                }
+
+                motion = new ReplicationEntityMotionMetadata(
+                    velocityX,
+                    velocityY,
+                    velocityZ,
+                    movementSpeed,
+                    (ReplicationAgentLocomotionGait)gaitValue,
+                    (flags & 1) != 0,
+                    (flags & 2) != 0,
+                    (flags & 4) != 0,
+                    (flags & 8) != 0,
+                    climbDirection,
+                    animatorSpeed,
+                    pathRevision);
+            }
+
             entity = new ReplicationEntityTransform(
                 entityId,
                 kind,
@@ -808,8 +883,14 @@ namespace GoingCooperative.Core.Replication
                 rotationX,
                 rotationY,
                 rotationZ,
-                rotationW);
+                rotationW,
+                motion);
             return true;
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
         }
 
         private static bool ValidateProtocol(string version, out string error)

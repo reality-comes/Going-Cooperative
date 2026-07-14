@@ -31,6 +31,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigActionAnimatorStateSampling;
         private static bool replicationConfigAnimateReplicatedMovement = true;
         private static bool replicationConfigSmoothReplicatedMovement = true;
+        private static bool replicationConfigSemanticAgentPresentation;
         private static bool replicationConfigNeedsReplication = true;
         private static bool replicationConfigForceHostMovement;
         private static bool replicationConfigSendSnapshots = true;
@@ -46,6 +47,20 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigPerfFpsProbe = true;
         private static bool replicationConfigResourcePileStateSnapshots;
         private static bool replicationConfigResourceContainerReplication;
+        // Combat is intentionally split into independently reversible layers. The
+        // master gate must be on before any future authoritative combat mutation
+        // path is allowed to run; diagnostics remain separately controllable.
+        private static bool replicationConfigCombatReplication;
+        private static bool replicationConfigCombatDraftCommands;
+        private static bool replicationConfigCombatAttackCommands;
+        private static bool replicationConfigCombatStateReplication;
+        private static bool replicationConfigCombatHealthReplication;
+        private static bool replicationConfigCombatHealthDetailReplication;
+        private static bool replicationConfigCombatDeathReplication;
+        private static bool replicationConfigCombatPresentationReplication;
+        private static bool replicationConfigCombatProjectileReplication;
+        private static bool replicationConfigCombatExternalAgentLifecycle;
+        private static bool replicationConfigCombatDiagnostics;
         private static string replicationConfigHost = "127.0.0.1";
         private static string replicationConfigProofIntent = "speed-normal";
         private static string replicationConfigCommandCaptureMode = "send";
@@ -143,6 +158,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigAnimateReplicatedMovement
                     + " smoothReplicatedMovement="
                     + replicationConfigSmoothReplicatedMovement
+                    + " semanticAgentPresentation="
+                    + replicationConfigSemanticAgentPresentation
                     + " needsReplication="
                     + replicationConfigNeedsReplication
                     + " interpolationMs="
@@ -181,6 +198,28 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigResourcePileStateSnapshots
                     + " resourceContainerReplication="
                     + replicationConfigResourceContainerReplication
+                    + " combatReplication="
+                    + replicationConfigCombatReplication
+                    + " combatDraftCommands="
+                    + replicationConfigCombatDraftCommands
+                    + " combatAttackCommands="
+                    + replicationConfigCombatAttackCommands
+                    + " combatStateReplication="
+                    + replicationConfigCombatStateReplication
+                    + " combatHealthReplication="
+                    + replicationConfigCombatHealthReplication
+                    + " combatHealthDetailReplication="
+                    + replicationConfigCombatHealthDetailReplication
+                    + " combatDeathReplication="
+                    + replicationConfigCombatDeathReplication
+                    + " combatPresentationReplication="
+                    + replicationConfigCombatPresentationReplication
+                    + " combatProjectileReplication="
+                    + replicationConfigCombatProjectileReplication
+                    + " combatExternalAgentLifecycle="
+                    + replicationConfigCombatExternalAgentLifecycle
+                    + " combatDiagnostics="
+                    + replicationConfigCombatDiagnostics
                     + " worldObjectDeltaApplyBudgetPerFrame="
                     + replicationConfigWorldObjectDeltaApplyBudgetPerFrame.ToString(CultureInfo.InvariantCulture)
                     + " worldObjectDeltaApplyQueueMax="
@@ -303,6 +342,18 @@ namespace GoingCooperative.Plugin.BepInEx
                     }
 
                     break;
+                case "semanticagentpresentation":
+                case "agentactivitypresentation":
+                    if (TryParseConfigBool(value, out var semanticAgentPresentation))
+                    {
+                        replicationConfigSemanticAgentPresentation = semanticAgentPresentation;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
                 case "needsreplication":
                 case "hungersleepreplication":
                 case "needsync":
@@ -315,6 +366,61 @@ namespace GoingCooperative.Plugin.BepInEx
                         LogReplicationConfigInvalidValue(current, lineNumber, key, value);
                     }
 
+                    break;
+                case "combatreplication":
+                case "combatenabled":
+                    if (TryParseConfigBool(value, out var combatReplication)) replicationConfigCombatReplication = combatReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combatdraftcommands":
+                case "combatdrafting":
+                    if (TryParseConfigBool(value, out var combatDraftCommands)) replicationConfigCombatDraftCommands = combatDraftCommands;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combatattackcommands":
+                case "combatorders":
+                    if (TryParseConfigBool(value, out var combatAttackCommands)) replicationConfigCombatAttackCommands = combatAttackCommands;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combatstatereplication":
+                case "combatstate":
+                    if (TryParseConfigBool(value, out var combatStateReplication)) replicationConfigCombatStateReplication = combatStateReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combathealthreplication":
+                case "combathealth":
+                    if (TryParseConfigBool(value, out var combatHealthReplication)) replicationConfigCombatHealthReplication = combatHealthReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combathealthdetailreplication":
+                case "combatwounds":
+                    if (TryParseConfigBool(value, out var combatHealthDetailReplication)) replicationConfigCombatHealthDetailReplication = combatHealthDetailReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combatdeathreplication":
+                case "combatdeath":
+                    if (TryParseConfigBool(value, out var combatDeathReplication)) replicationConfigCombatDeathReplication = combatDeathReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combatpresentationreplication":
+                case "combatpresentation":
+                    if (TryParseConfigBool(value, out var combatPresentationReplication)) replicationConfigCombatPresentationReplication = combatPresentationReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combatprojectilereplication":
+                case "combatprojectiles":
+                    if (TryParseConfigBool(value, out var combatProjectileReplication)) replicationConfigCombatProjectileReplication = combatProjectileReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combatexternalagentlifecycle":
+                case "combathostiles":
+                    if (TryParseConfigBool(value, out var combatExternalAgentLifecycle)) replicationConfigCombatExternalAgentLifecycle = combatExternalAgentLifecycle;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "combatdiagnostics":
+                case "combatprobes":
+                    if (TryParseConfigBool(value, out var combatDiagnostics)) replicationConfigCombatDiagnostics = combatDiagnostics;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
                     break;
                 case "applysnapshots":
                     if (TryParseConfigBool(value, out var applySnapshots))

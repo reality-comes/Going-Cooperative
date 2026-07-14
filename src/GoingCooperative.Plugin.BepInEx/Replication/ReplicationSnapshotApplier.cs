@@ -123,9 +123,20 @@ namespace GoingCooperative.Plugin.BepInEx
                 // is what keeps nametags/selection attached. Both write the same target.
                 transform.position = target;
                 transform.rotation = rotation;
-                if (UpdateReplicationVisualLocomotion(snapshot.Sequence, entity.EntityId, target, view.Animator))
+                var semanticMetadata = entity.Motion;
+                var semanticMotion = replicationConfigSemanticAgentPresentation && semanticMetadata.HasValue;
+                var semanticWorkActive = IsReplicationSemanticWorkPresentationActive(entity.EntityId);
+                if (!semanticWorkActive
+                    && (semanticMotion
+                        ? ApplyReplicationSemanticLocomotion(entity.EntityId, view.Animator, semanticMetadata.GetValueOrDefault())
+                        : UpdateReplicationVisualLocomotion(snapshot.Sequence, entity.EntityId, target, view.Animator)))
                 {
                     visuallyMoving++;
+                }
+
+                if (replicationConfigSemanticAgentPresentation && !semanticMotion && !semanticWorkActive)
+                {
+                    ResetReplicationSemanticLocomotion(view.Animator);
                 }
 
                 applied++;

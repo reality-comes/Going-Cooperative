@@ -128,7 +128,7 @@ namespace GoingCooperative.Plugin.BepInEx
 
                 replicationRuntimeStarted = true;
                 replicationRemoteCompatibilityRefused = false;
-                replicationLocalBuildHash = ComputeReplicationLocalBuildHash();
+                replicationLocalBuildHash = ComputeReplicationLocalBuildHashWithCapabilities();
                 replicationNextHelloRealtime = 0f;
                 replicationNextHelloLogRealtime = 0f;
                 replicationNextSnapshotRealtime = 0f;
@@ -137,6 +137,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 replicationEarliestProofIntentRealtime = Time.realtimeSinceStartup + Math.Max(0, replicationConfigProofIntentDelaySeconds);
                 LogReplicationInfo("Going Cooperative replication runtime started mode="
                     + (replicationConfigHostMode ? "host" : "client")
+                    + " agentPresentation="
+                    + (replicationConfigSemanticAgentPresentation ? "semantic" : "legacy")
                     + " port="
                     + replicationConfigPort.ToString(CultureInfo.InvariantCulture)
                     + " protocol="
@@ -210,6 +212,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 ProcessPendingReplicationNeedsRepairs();
             }
 
+            ProcessReplicationSemanticAgentMotionPresentation();
+            ProcessReplicationSemanticAgentWorkPresentation();
+            ProcessReplicationCombatPresentationExpiry();
+
             LogReplicationStatusIfDue();
         }
 
@@ -222,6 +228,9 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationRemoteHelloReceived = false;
             replicationRemoteCompatibilityRefused = false;
             replicationLocalBuildHash = string.Empty;
+            ResetReplicationCombatRuntimeState();
+            ResetReplicationSemanticAgentMotionPresentation();
+            ResetReplicationSemanticAgentWorkPresentation();
             replicationNextHelloLogRealtime = 0f;
             replicationNextSnapshotValidationRealtime = 0f;
             replicationNextResourcePileStateSnapshotRealtime = 0f;
@@ -315,9 +324,13 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationHostCommandIntentKeys.Clear();
             replicationPendingWorldObjectDeltas.Clear();
             replicationClientAppliedWorldObjectDeltaSequences.Clear();
+            ReplicationClientPriorityWorldObjectDeltaApplies.Clear();
             ReplicationClientPendingWorldObjectDeltaApplies.Clear();
             ReplicationClientCoalescableWorldObjectDeltaApplies.Clear();
             ReplicationClientQueuedWorldObjectDeltaSequences.Clear();
+            ReplicationAgentProgressOwnerByBar.Clear();
+            ReplicationAgentProgressLastPermilleByKey.Clear();
+            ReplicationAgentProgressLoggedOwnerKeys.Clear();
             ReplicationWorldObjectDeltaAppliedSpawnKeys.Clear();
             ReplicationWorldObjectDeltaRecentSpawnLocationAt.Clear();
             ReplicationResourcePileStateSnapshotContexts.Clear();
@@ -498,12 +511,60 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
+            var localBuildHash = GetReplicationLocalBuildHash();
+            var localHasAgentPresentationCapability = TryReadReplicationAgentPresentationCapability(
+                localBuildHash,
+                out var localAgentPresentationEnabled,
+                out var localAgentPresentationWireVersion);
+            var remoteHasAgentPresentationCapability = TryReadReplicationAgentPresentationCapability(
+                hello.BuildHash,
+                out var remoteAgentPresentationEnabled,
+                out var remoteAgentPresentationWireVersion);
+            if (localHasAgentPresentationCapability
+                && remoteHasAgentPresentationCapability
+                && localAgentPresentationEnabled != remoteAgentPresentationEnabled)
+            {
+                error = "agent-presentation-capability-mismatch local="
+                    + (localAgentPresentationEnabled ? "1" : "0")
+                    + " remote="
+                    + (remoteAgentPresentationEnabled ? "1" : "0");
+                return false;
+            }
+
+            if (localHasAgentPresentationCapability
+                && remoteHasAgentPresentationCapability
+                && (localAgentPresentationEnabled || remoteAgentPresentationEnabled)
+                && !string.Equals(localAgentPresentationWireVersion, remoteAgentPresentationWireVersion, StringComparison.Ordinal))
+            {
+                error = "agent-presentation-format-mismatch local="
+                    + localAgentPresentationWireVersion
+                    + " remote="
+                    + remoteAgentPresentationWireVersion;
+                return false;
+            }
+
+            if (replicationConfigSemanticAgentPresentation && !remoteHasAgentPresentationCapability)
+            {
+                error = "agent-presentation-capability-missing remote=<legacy>";
+                return false;
+            }
+
+            var localHasCombatCapabilities = TryReadReplicationCombatCapabilityFingerprint(localBuildHash, out var localCombatCapabilities);
+            var remoteHasCombatCapabilities = TryReadReplicationCombatCapabilityFingerprint(hello.BuildHash, out var remoteCombatCapabilities);
+            if (localHasCombatCapabilities
+                && remoteHasCombatCapabilities
+                && !string.Equals(localCombatCapabilities, remoteCombatCapabilities, StringComparison.Ordinal))
+            {
+                error = "combat-capabilities-mismatch local=" + localCombatCapabilities + " remote=" + remoteCombatCapabilities;
+                return false;
+            }
+
             // Build-hash mismatch warns but does not refuse. A hard refusal here turns a
             // slightly stale staged dll into a silent one-way break: the host flips
             // remoteHelloReceived=false, which stops hello/snapshot/pile sends while
             // ungated channels keep flowing - indistinguishable from partial network
             // failure. Protocol version remains the hard wire-format gate.
-            if (!string.Equals(hello.BuildHash, GetReplicationLocalBuildHash(), StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(hello.BuildHash, localBuildHash, StringComparison.OrdinalIgnoreCase))
             {
                 WarnReplicationBuildHashMismatchIfDue(hello);
             }
@@ -539,10 +600,86 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             if (string.IsNullOrEmpty(replicationLocalBuildHash))
             {
-                replicationLocalBuildHash = ComputeReplicationLocalBuildHash();
+                replicationLocalBuildHash = ComputeReplicationLocalBuildHashWithCapabilities();
             }
 
             return replicationLocalBuildHash;
+        }
+
+        private static string ComputeReplicationLocalBuildHashWithCapabilities()
+        {
+            return ComputeReplicationLocalBuildHash()
+                + "|agent="
+                + FormatReplicationAgentPresentationCapability()
+                + "|combat="
+                + FormatReplicationCombatCapabilityFingerprint();
+        }
+
+        private static string FormatReplicationAgentPresentationCapability()
+        {
+            return (replicationConfigSemanticAgentPresentation ? "1" : "0")
+                + ":"
+                + ReplicationEntityMotionMetadata.WireVersion;
+        }
+
+        private static bool TryReadReplicationAgentPresentationCapability(
+            string buildHash,
+            out bool enabled,
+            out string wireVersion)
+        {
+            enabled = false;
+            wireVersion = string.Empty;
+            const string marker = "|agent=";
+            var markerIndex = buildHash.LastIndexOf(marker, StringComparison.Ordinal);
+            if (markerIndex < 0) return false;
+
+            var valueIndex = markerIndex + marker.Length;
+            if (valueIndex >= buildHash.Length) return false;
+            var value = buildHash[valueIndex];
+            if (value != '0' && value != '1') return false;
+            if (valueIndex + 2 >= buildHash.Length || buildHash[valueIndex + 1] != ':') return false;
+
+            var endIndex = buildHash.IndexOf('|', valueIndex + 2);
+            wireVersion = endIndex >= 0
+                ? buildHash.Substring(valueIndex + 2, endIndex - (valueIndex + 2))
+                : buildHash.Substring(valueIndex + 2);
+            if (string.IsNullOrWhiteSpace(wireVersion))
+            {
+                wireVersion = string.Empty;
+                return false;
+            }
+
+            enabled = value == '1';
+            return true;
+        }
+
+        private static string FormatReplicationCombatCapabilityFingerprint()
+        {
+            return (replicationConfigCombatReplication ? "1" : "0")
+                + (replicationConfigCombatDraftCommands ? "1" : "0")
+                + (replicationConfigCombatAttackCommands ? "1" : "0")
+                + (replicationConfigCombatStateReplication ? "1" : "0")
+                + (replicationConfigCombatHealthReplication ? "1" : "0")
+                + (replicationConfigCombatHealthDetailReplication ? "1" : "0")
+                + (replicationConfigCombatDeathReplication ? "1" : "0")
+                + (replicationConfigCombatPresentationReplication ? "1" : "0")
+                + (replicationConfigCombatProjectileReplication ? "1" : "0")
+                + (replicationConfigCombatExternalAgentLifecycle ? "1" : "0");
+        }
+
+        private static bool TryReadReplicationCombatCapabilityFingerprint(string buildHash, out string fingerprint)
+        {
+            fingerprint = string.Empty;
+            const string marker = "|combat=";
+            var markerIndex = buildHash.LastIndexOf(marker, StringComparison.Ordinal);
+            if (markerIndex < 0) return false;
+            fingerprint = buildHash.Substring(markerIndex + marker.Length);
+            if (fingerprint.Length != 10) return false;
+            for (var i = 0; i < fingerprint.Length; i++)
+            {
+                if (fingerprint[i] != '0' && fingerprint[i] != '1') return false;
+            }
+            return true;
         }
 
         private static string ComputeReplicationLocalBuildHash()
@@ -889,6 +1026,7 @@ namespace GoingCooperative.Plugin.BepInEx
             SendReplicationRegionOrderStateIfSupported(command, result);
             SendReplicationBuildBlueprintResultDeltaIfSupported(command, result);
             SendReplicationManagementStateIfSupported(command, result);
+            SendReplicationCombatStateIfSupported(command, result);
 
             replicationLastIntentSummary = "host-applied invoked="
                 + (result.Invoked ? "yes" : "no")
@@ -1484,6 +1622,8 @@ namespace GoingCooperative.Plugin.BepInEx
             WarnReplicationTransportDropsIfDue();
             LogReplicationInfo("Going Cooperative replication status mode="
                 + (replicationConfigHostMode ? "host" : "client")
+                + " agentPresentation="
+                + (replicationConfigSemanticAgentPresentation ? "semantic" : "legacy")
                 + " remoteHello="
                 + replicationRemoteHelloReceived
                 + " compatibilityRefused="
@@ -1588,6 +1728,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 + (string.IsNullOrEmpty(replicationLastDriftSummary) ? "<none>" : replicationLastDriftSummary)
                 + " lastGameTime="
                 + (string.IsNullOrEmpty(replicationLastGameTimeSummary) ? "<none>" : replicationLastGameTimeSummary)
+                + " "
+                + FormatReplicationSemanticAgentMotionStatus()
+                + " "
+                + FormatReplicationSemanticWorkStatus()
                 + " lastResync="
                 + (string.IsNullOrEmpty(replicationLastResyncSummary) ? "<none>" : replicationLastResyncSummary));
         }

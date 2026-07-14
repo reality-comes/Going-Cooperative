@@ -14,11 +14,12 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $output = Join-Path $outputDirectory "CorePolicyTests.exe"
 $sources = @(
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\CoordinateResolverPolicy.cs"),
+    (Join-Path $repositoryRoot "src\GoingCooperative.Core\CombatPresentationOrderingPolicy.cs"),
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\LockstepCommandPayloads.cs"),
     (Join-Path $repositoryRoot "tests\CorePolicyTests.cs")
 )
 
-& $dotnet $compiler -noconfig -nostdlib+ -target:exe -langversion:10.0 "-out:$output" `
+& $dotnet $compiler -noconfig -nostdlib+ -target:exe -langversion:10.0 -nullable:enable "-out:$output" `
     "-r:$(Join-Path $managed 'mscorlib.dll')" `
     "-r:$(Join-Path $managed 'System.dll')" `
     "-r:$(Join-Path $managed 'System.Core.dll')" `
@@ -26,3 +27,18 @@ $sources = @(
 if ($LASTEXITCODE -ne 0) { throw "Core policy test compilation failed." }
 & $output
 if ($LASTEXITCODE -ne 0) { throw "Core policy tests failed." }
+
+$releaseConfig = Join-Path $repositoryRoot "config\replication.cfg"
+$settings = @{}
+foreach ($line in Get-Content -LiteralPath $releaseConfig) {
+    $trimmed = $line.Trim()
+    if ($trimmed.Length -eq 0 -or $trimmed.StartsWith("#") -or $trimmed.StartsWith(";")) { continue }
+    $separator = $trimmed.IndexOf("=")
+    if ($separator -le 0) { continue }
+    $settings[$trimmed.Substring(0, $separator).Trim().ToLowerInvariant()] = $trimmed.Substring($separator + 1).Trim()
+}
+if ($settings["enabled"] -ne "false") { throw "Release config must leave replication disabled until the Multiplayer UI starts a session." }
+if ($settings["multiplayermenu"] -ne "true") { throw "Release config must enable the Multiplayer UI." }
+if ($settings["semanticagentpresentation"] -ne "false") { throw "Release config must leave experimental semantic agent presentation disabled by default." }
+if ($settings.ContainsKey("mode") -or $settings.ContainsKey("host")) { throw "Release config must not hard-code a session role or host address." }
+Write-Host "PASS ReleaseConfigPolicy"

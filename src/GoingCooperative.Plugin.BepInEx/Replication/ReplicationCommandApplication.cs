@@ -51,6 +51,14 @@ namespace GoingCooperative.Plugin.BepInEx
                 return TryInvokePlantResourceManagerRegionOrder(orderType, startX, startY, startZ, endX, endY, endZ, out detail);
             }
 
+            if (string.Equals(orderType, "Fishing", StringComparison.Ordinal)
+                || (string.Equals(orderType, "Cancel", StringComparison.Ordinal)
+                    && string.Equals(areaType, "ContextualResource", StringComparison.Ordinal)
+                    && subType.IndexOf("FishMapResource", StringComparison.OrdinalIgnoreCase) >= 0))
+            {
+                return TryInvokeFishingRegionOrder(orderType, startX, startY, startZ, endX, endY, endZ, out detail);
+            }
+
             if (IsReplicationAllowForbidRegionOrder(orderType))
             {
                 return TryInvokeAllowForbidRegionOrder(orderType, startX, startY, startZ, endX, endY, endZ, allowType, out detail);
@@ -77,6 +85,52 @@ namespace GoingCooperative.Plugin.BepInEx
 
         bool IRuntimeCommandActions.ApplyCustom(string payloadJson, out string detail)
         {
+            if (LockstepCommandPayloads.TryReadDraftStatePayload(payloadJson, out var draftEntityId, out var drafted, out var combatMode))
+            {
+                return TryApplyReplicationCombatDraftState(draftEntityId, drafted, combatMode, out detail);
+            }
+
+            if (LockstepCommandPayloads.TryReadDraftMovePayload(
+                payloadJson,
+                out var movingEntityIds,
+                out var targetX,
+                out var targetY,
+                out var targetZ,
+                out var moveCombatMode))
+            {
+                return TryApplyReplicationCombatDraftMove(movingEntityIds, targetX, targetY, targetZ, moveCombatMode, out detail);
+            }
+
+            if (LockstepCommandPayloads.TryReadCombatAttackPayload(
+                payloadJson,
+                out var attackerEntityIds,
+                out var targetKind,
+                out var combatTargetId,
+                out var combatTargetX,
+                out var combatTargetY,
+                out var combatTargetZ))
+            {
+                return TryApplyReplicationCombatAttack(
+                    attackerEntityIds,
+                    targetKind,
+                    combatTargetId,
+                    combatTargetX,
+                    combatTargetY,
+                    combatTargetZ,
+                    authoritativeExecution: true,
+                    out detail);
+            }
+
+            if (LockstepCommandPayloads.TryReadCombatCancelPayload(payloadJson, out var cancellingEntityIds))
+            {
+                return TryApplyReplicationCombatCancel(cancellingEntityIds, authoritativeExecution: true, out detail);
+            }
+
+            if (LockstepCommandPayloads.TryReadManagementPolicyPayload(payloadJson, out var policy, out var targetId, out var key, out var index, out var policyValue, out var policyEnabled))
+            {
+                return TryApplyReplicationManagementPolicy(policy, targetId, key, index, policyValue, policyEnabled, out detail);
+            }
+
             if (LockstepCommandPayloads.TryReadResearchActivatePayload(payloadJson, out var nodeId))
             {
                 return TryApplyReplicationResearchActivate(nodeId, out detail);
@@ -193,6 +247,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool IsReplicationRegionOrderStateSupported(string orderType)
         {
             return IsReplicationDigRegionOrder(orderType)
+                || string.Equals(orderType, "Fishing", StringComparison.Ordinal)
                 || IsReplicationPlantRegionOrder(orderType)
                 || IsReplicationAllowForbidRegionOrder(orderType)
                 || IsReplicationStockpileRegionOrder(orderType)

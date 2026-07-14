@@ -19,6 +19,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static readonly Dictionary<string, float> ReplicationWorldObjectDeltaRecentSpawnLocationAt = new Dictionary<string, float>(StringComparer.Ordinal);
         private static readonly Dictionary<long, PendingReplicationWorldObjectDelta> replicationPendingWorldObjectDeltas = new Dictionary<long, PendingReplicationWorldObjectDelta>();
         private static readonly HashSet<long> replicationClientAppliedWorldObjectDeltaSequences = new HashSet<long>();
+        private static readonly Queue<PendingReplicationClientWorldObjectDeltaApply> ReplicationClientPriorityWorldObjectDeltaApplies = new Queue<PendingReplicationClientWorldObjectDeltaApply>();
         private static readonly Queue<PendingReplicationClientWorldObjectDeltaApply> ReplicationClientPendingWorldObjectDeltaApplies = new Queue<PendingReplicationClientWorldObjectDeltaApply>();
         private static readonly Dictionary<string, PendingReplicationClientWorldObjectDeltaApply> ReplicationClientCoalescableWorldObjectDeltaApplies =
             new Dictionary<string, PendingReplicationClientWorldObjectDeltaApply>(StringComparer.Ordinal);
@@ -467,7 +468,7 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var trigger = __args[1] as string;
-            trigger = string.IsNullOrWhiteSpace(trigger) ? string.Empty : trigger.Trim();
+            trigger = string.IsNullOrWhiteSpace(trigger) ? string.Empty : trigger!.Trim();
             if (string.IsNullOrWhiteSpace(trigger))
             {
                 return;
@@ -484,7 +485,19 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
-            var action = __args[0];
+            var action = __args[0]!;
+            var animationMode = __args[2]?.ToString() ?? "None";
+            var isSequenced = __args[3] is bool parsedIsSequenced && parsedIsSequenced;
+            if (TryCaptureReplicationSemanticWorkAnimation(
+                    action,
+                    trigger,
+                    animationMode,
+                    isSequenced,
+                    __originalMethod))
+            {
+                return;
+            }
+
             if (!TryGetReplicationGoapActionEntityId(action, trigger, out var entityId, out var entityDetail)
                 || string.IsNullOrWhiteSpace(entityId))
             {
@@ -499,12 +512,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
-            var animationMode = __args[2]?.ToString() ?? "None";
-            var isSequenced = __args[3] is bool parsedIsSequenced && parsedIsSequenced;
             RecordReplicationActionAnimationDelta(current, __originalMethod, entityId, trigger, animationMode, isSequenced, entityDetail);
         }
 
-        private static void ReplicationGoapActionLifecyclePostfix(object __instance, MethodBase __originalMethod)
+        private static void ReplicationGoapActionLifecyclePostfix(object __instance, MethodBase __originalMethod, object[] __args)
         {
             if (!replicationConfigEnabled
                 || !replicationConfigHostMode
@@ -515,11 +526,20 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             TryCacheReplicationGoapActionOwner(__instance, __originalMethod.Name);
-            RecordReplicationGoapActionPhase(__instance, __originalMethod.Name);
+            RecordReplicationGoapActionPhase(__instance, __originalMethod.Name, __args, __originalMethod);
         }
 
-        private static void RecordReplicationGoapActionPhase(object action, string phase)
+        private static void RecordReplicationGoapActionPhase(
+            object action,
+            string phase,
+            object[]? lifecycleArguments,
+            MethodBase lifecycleMethod)
         {
+            if (TryRecordReplicationSemanticWorkPhase(action, phase, lifecycleArguments, lifecycleMethod))
+            {
+                return;
+            }
+
             if (!replicationConfigActionPhaseReplication
                 || (phase != "Init" && phase != "Complete")
                 || !TryGetReplicationGoapActionEntityId(action, out var entityId, out _)
@@ -673,6 +693,15 @@ namespace GoingCooperative.Plugin.BepInEx
             bool isSequenced,
             string identityDetail)
         {
+            if (replicationConfigCombatReplication
+                && replicationConfigCombatPresentationReplication
+                && string.Equals(trigger, "Attack", StringComparison.Ordinal))
+            {
+                // Attack is lifecycle-sensitive. The combat presentation contract
+                // starts it only after the host has entered the real charge action.
+                return;
+            }
+
             var handItemId = string.Empty;
             var cacheUpdated = false;
             lock (ReplicationWorldObjectDeltaLock)
@@ -758,6 +787,19 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var overlayType = __0?.ToString() ?? "Unknown";
+            if (replicationConfigCombatReplication
+                && replicationConfigCombatPresentationReplication
+                && string.Equals(overlayType, "CombatCircle", StringComparison.Ordinal))
+            {
+                // The semantic charge event creates one client-local game Timer;
+                // do not retain the bar or stream its value every frame. Remove a
+                // stale pooled-bar mapping before the instance can emit an update.
+                lock (ReplicationWorldObjectDeltaLock)
+                {
+                    ReplicationAgentProgressOwnerByBar.Remove(__result);
+                }
+                return;
+            }
             var key = entityId + "|" + overlayType;
             var shouldLog = false;
             lock (ReplicationWorldObjectDeltaLock)
@@ -803,6 +845,13 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 ReplicationAgentProgressLastPermilleByKey.Remove(key);
                 ReplicationAgentProgressLoggedOwnerKeys.Remove(key);
+                RemoveReplicationAgentProgressOwnerMappingsUnderLock(entityId, overlayType);
+            }
+            if (replicationConfigCombatReplication
+                && replicationConfigCombatPresentationReplication
+                && string.Equals(overlayType, "CombatCircle", StringComparison.Ordinal))
+            {
+                return;
             }
 
             var current = instance;
@@ -851,6 +900,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 {
                     return;
                 }
+            }
+
+            if (replicationConfigCombatReplication
+                && replicationConfigCombatPresentationReplication
+                && string.Equals(owner.OverlayType, "CombatCircle", StringComparison.Ordinal))
+            {
+                return;
             }
 
             var clampedProgress = Mathf.Clamp01(__0);
@@ -922,6 +978,7 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var goalId = string.IsNullOrWhiteSpace(__0) ? "Idle" : __0.Trim();
+            TryEndReplicationSemanticWorkForEntity(entityId, goalId, __1);
             var statusText = NormalizeReplicationAgentActionStatusText(goalId, __1);
             var animationToken = ResolveReplicationPuppetAnimationToken(goalId, statusText);
             var handItemId = TryResolveReplicationActiveHandItemId(__instance, entityId, out var activeHandItemId, out _)
@@ -1432,6 +1489,16 @@ namespace GoingCooperative.Plugin.BepInEx
             var handItemId = TryResolveReplicationActiveHandItemId(agentOwner, entityId, out var activeHandItemId, out _)
                 ? activeHandItemId
                 : string.Empty;
+            if (string.Equals(kind, "AgentAnimationTriggered", StringComparison.Ordinal)
+                && TryCaptureReplicationSemanticWorkControllerAnimation(
+                    entityId,
+                    normalizedTrigger,
+                    animatorStateDetail,
+                    handItemId))
+            {
+                return;
+            }
+
             if (replicationConfigAnimationDiagnostics)
             {
                 current.LogReplicationInfo("Going Cooperative replication animation payload probe "
@@ -1738,6 +1805,24 @@ namespace GoingCooperative.Plugin.BepInEx
                     current.SendReplicationWorldObjectDelta(delta);
                 }
             }
+        }
+
+        private static void RemoveReplicationAgentProgressOwnerMappingsUnderLock(string entityId, string overlayType)
+        {
+            List<object>? matchingBars = null;
+            foreach (var pair in ReplicationAgentProgressOwnerByBar)
+            {
+                if (string.Equals(pair.Value.EntityId, entityId, StringComparison.Ordinal)
+                    && string.Equals(pair.Value.OverlayType, overlayType, StringComparison.Ordinal))
+                {
+                    matchingBars ??= new List<object>();
+                    matchingBars.Add(pair.Key);
+                }
+            }
+
+            if (matchingBars == null) return;
+            for (var i = 0; i < matchingBars.Count; i++)
+                ReplicationAgentProgressOwnerByBar.Remove(matchingBars[i]);
         }
 
         private static bool TryCreateReplicationWorldObjectDelta(
@@ -2759,6 +2844,27 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool ShouldSkipDuplicateReplicationWorldObjectDelta(ReplicationWorldObjectDelta delta)
         {
+            if (string.Equals(delta.DeltaKind, CombatStateDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, CombatOutcomeDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, CombatPresentationDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, CombatHealthDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, CombatDeathDeltaKind, StringComparison.Ordinal))
+            {
+                // Combat can generate several ordered transitions inside the generic
+                // duplicate window; sequence/ack handling provides actual deduplication.
+                return false;
+            }
+
+            if (string.Equals(delta.DeltaKind, ReplicationAgentWorkPresentationDeltaKind, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (string.Equals(delta.DeltaKind, ReplicationAgentMotionPresentationDeltaKind, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
             if (string.Equals(delta.DeltaKind, "AgentNeedLifecycle", StringComparison.Ordinal))
             {
                 // Lifecycle phases may legitimately transition several times inside the
@@ -2979,6 +3085,7 @@ namespace GoingCooperative.Plugin.BepInEx
             var queueCount = 0;
             PendingReplicationClientWorldObjectDeltaApply? replacedPending = null;
             var coalesceKey = FormatReplicationWorldObjectDeltaCoalesceKey(delta);
+            var priority = IsReplicationPriorityWorldObjectDelta(delta);
             lock (ReplicationWorldObjectDeltaLock)
             {
                 if (ReplicationClientQueuedWorldObjectDeltaSequences.Contains(delta.Sequence))
@@ -3000,7 +3107,9 @@ namespace GoingCooperative.Plugin.BepInEx
                     return;
                 }
 
-                if (ReplicationClientPendingWorldObjectDeltaApplies.Count >= replicationConfigWorldObjectDeltaApplyQueueMax)
+                if (ReplicationClientPriorityWorldObjectDeltaApplies.Count
+                    + ReplicationClientPendingWorldObjectDeltaApplies.Count
+                    >= replicationConfigWorldObjectDeltaApplyQueueMax)
                 {
                     overflow = true;
                 }
@@ -3015,14 +3124,22 @@ namespace GoingCooperative.Plugin.BepInEx
                     }
 
                     var pending = new PendingReplicationClientWorldObjectDeltaApply(delta, coalesceKey);
-                    ReplicationClientPendingWorldObjectDeltaApplies.Enqueue(pending);
+                    if (priority)
+                    {
+                        ReplicationClientPriorityWorldObjectDeltaApplies.Enqueue(pending);
+                    }
+                    else
+                    {
+                        ReplicationClientPendingWorldObjectDeltaApplies.Enqueue(pending);
+                    }
                     ReplicationClientQueuedWorldObjectDeltaSequences.Add(delta.Sequence);
                     if (!string.IsNullOrEmpty(coalesceKey))
                     {
                         ReplicationClientCoalescableWorldObjectDeltaApplies[coalesceKey] = pending;
                     }
 
-                    queueCount = ReplicationClientPendingWorldObjectDeltaApplies.Count;
+                    queueCount = ReplicationClientPriorityWorldObjectDeltaApplies.Count
+                        + ReplicationClientPendingWorldObjectDeltaApplies.Count;
                     queued = true;
                 }
             }
@@ -3041,6 +3158,7 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 replicationLastWorldObjectDeltaSummary = "queued queue="
                     + queueCount.ToString(CultureInfo.InvariantCulture)
+                    + (priority ? " priority=yes" : string.Empty)
                     + (string.IsNullOrEmpty(coalesceKey) ? string.Empty : " coalesceKey=" + coalesceKey)
                     + " "
                     + FormatReplicationWorldObjectDelta(delta);
@@ -3048,6 +3166,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 {
                     LogReplicationInfo("Going Cooperative replication world object delta queued queue="
                         + queueCount.ToString(CultureInfo.InvariantCulture)
+                        + (priority ? " priority=yes" : string.Empty)
                         + (string.IsNullOrEmpty(coalesceKey) ? string.Empty : " coalesceKey=" + coalesceKey)
                         + " "
                         + FormatReplicationWorldObjectDelta(delta));
@@ -3103,12 +3222,15 @@ namespace GoingCooperative.Plugin.BepInEx
                 PendingReplicationClientWorldObjectDeltaApply? pending = null;
                 lock (ReplicationWorldObjectDeltaLock)
                 {
-                    if (ReplicationClientPendingWorldObjectDeltaApplies.Count == 0)
+                    if (ReplicationClientPriorityWorldObjectDeltaApplies.Count == 0
+                        && ReplicationClientPendingWorldObjectDeltaApplies.Count == 0)
                     {
                         return;
                     }
 
-                    pending = ReplicationClientPendingWorldObjectDeltaApplies.Dequeue();
+                    pending = ReplicationClientPriorityWorldObjectDeltaApplies.Count > 0
+                        ? ReplicationClientPriorityWorldObjectDeltaApplies.Dequeue()
+                        : ReplicationClientPendingWorldObjectDeltaApplies.Dequeue();
                     ReplicationClientQueuedWorldObjectDeltaSequences.Remove(pending.Delta.Sequence);
                     if (!string.IsNullOrEmpty(pending.CoalesceKey)
                         && ReplicationClientCoalescableWorldObjectDeltaApplies.TryGetValue(pending.CoalesceKey, out var current)
@@ -3169,8 +3291,19 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             lock (ReplicationWorldObjectDeltaLock)
             {
-                return ReplicationClientPendingWorldObjectDeltaApplies.Count;
+                return ReplicationClientPriorityWorldObjectDeltaApplies.Count
+                    + ReplicationClientPendingWorldObjectDeltaApplies.Count;
             }
+        }
+
+        private static bool IsReplicationPriorityWorldObjectDelta(ReplicationWorldObjectDelta delta)
+        {
+            // Presentation is latency-sensitive and cheap to apply. Keep its ordered
+            // lifecycle from waiting behind expensive world lookups while retaining
+            // the same global queue bound and per-frame/time budgets.
+            return string.Equals(delta.DeltaKind, CombatPresentationDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, ReplicationAgentWorkPresentationDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, ReplicationAgentMotionPresentationDeltaKind, StringComparison.Ordinal);
         }
 
         private static int GetCoalescableReplicationWorldObjectDeltaApplyCount()
@@ -3275,7 +3408,8 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool IsTransientReplicationWorldObjectDelta(ReplicationWorldObjectDelta delta)
         {
-            return string.Equals(delta.DeltaKind, "AgentActionHeartbeat", StringComparison.Ordinal)
+            return string.Equals(delta.DeltaKind, CombatOutcomeDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, "AgentActionHeartbeat", StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, "AgentProgressUpdated", StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, "AgentAnimationTriggered", StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, "AgentAnimationReset", StringComparison.Ordinal)
@@ -3332,6 +3466,15 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryApplyReplicationWorldObjectDelta(ReplicationWorldObjectDelta delta, out string detail)
         {
+            if (string.Equals(delta.DeltaKind, CombatStateDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, CombatOutcomeDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, CombatPresentationDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, CombatHealthDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, CombatDeathDeltaKind, StringComparison.Ordinal))
+            {
+                return TryApplyReplicationCombatWorldDelta(delta, out detail);
+            }
+
             if (string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal))
             {
                 return TryApplyReplicationManagementDelta(delta, out detail);
@@ -3431,6 +3574,16 @@ namespace GoingCooperative.Plugin.BepInEx
                 || string.Equals(delta.DeltaKind, "AgentCarryResourceCleared", StringComparison.Ordinal))
             {
                 return TryApplyReplicationAgentCarryResourceDelta(delta, out detail);
+            }
+
+            if (string.Equals(delta.DeltaKind, ReplicationAgentWorkPresentationDeltaKind, StringComparison.Ordinal))
+            {
+                return TryApplyReplicationSemanticWorkDelta(delta, out detail);
+            }
+
+            if (string.Equals(delta.DeltaKind, ReplicationAgentMotionPresentationDeltaKind, StringComparison.Ordinal))
+            {
+                return TryApplyReplicationSemanticAgentMotionDelta(delta, out detail);
             }
 
             if (string.Equals(delta.DeltaKind, "AgentAnimationTriggered", StringComparison.Ordinal)
@@ -5107,8 +5260,32 @@ namespace GoingCooperative.Plugin.BepInEx
                 return disposed;
             }
 
+            if (delta.Detail.IndexOf("PlantMapResourceInstance.Dispose", StringComparison.Ordinal) >= 0
+                && !TryGetPlantAt(delta.GridX, delta.GridY, delta.GridZ, out _, out var directPlantDetail)
+                && string.Equals(directPlantDetail, "plant-missing", StringComparison.Ordinal))
+            {
+                // PlantResourceManager is the authoritative index for this captured
+                // runtime type. Avoid a full scan of every map-resource dictionary
+                // when its direct coordinate lookup already proves the delete done.
+                detail = "ok already-disposed source=plant-manager " + directPlantDetail;
+                return true;
+            }
+
             if (!TryFindReplicationMapResourceAt(delta.GridX, delta.GridY, delta.GridZ, delta.BlueprintId, delta.UniqueId, out var plant, out var lookupDetail) || plant == null)
             {
+                if (lookupDetail.StartsWith("map-resource-missing ", StringComparison.Ordinal)
+                    && TryReadReplicationWorldObjectDetailInt(lookupDetail, "scannedManagers", out var scannedManagers)
+                    && scannedManagers > 0
+                    && TryReadReplicationWorldObjectDetailInt(lookupDetail, "scannedEntries", out var scannedEntries)
+                    && scannedEntries > 0)
+                {
+                    // Dispose is idempotent. A completed manager scan proving the
+                    // coordinate is already absent has reached the authoritative
+                    // postcondition and must be acknowledged to prevent retry scans.
+                    detail = "ok already-disposed " + lookupDetail;
+                    return true;
+                }
+
                 detail = "map-resource-lookup-failed " + lookupDetail;
                 return false;
             }
@@ -7397,6 +7574,81 @@ namespace GoingCooperative.Plugin.BepInEx
                 : "methods=" + string.Join("+", invoked.ToArray());
         }
 
+        private static string InvokeReplicationSemanticWorkAnimationTrigger(object view, string trigger, string animatorStateDetail)
+        {
+            if (!replicationConfigSemanticAgentPresentation)
+            {
+                return InvokeReplicationAgentViewAnimationTrigger(view, trigger, animatorStateDetail);
+            }
+
+            var invoked = new List<string>(4);
+            SetInstancePropertyIfPresent(view, view.GetType(), "TriggeredAnimationRunning", true);
+
+            var stateDetail = ApplyReplicationAnimatorStateDetail(view, animatorStateDetail);
+            if (!string.IsNullOrWhiteSpace(stateDetail))
+            {
+                invoked.Add("pre:" + stateDetail);
+            }
+
+            var actionParameterDetail = ApplyReplicationPuppetActionAnimatorParameters(view, trigger);
+            if (!string.IsNullOrWhiteSpace(actionParameterDetail))
+            {
+                invoked.Add("pre:" + actionParameterDetail);
+            }
+
+            var delivered = false;
+            var onTriggerAnimation = FindReplicationInstanceMethod(view.GetType(), "OnTriggerAnimation", new[] { typeof(string) });
+            if (onTriggerAnimation != null)
+            {
+                try
+                {
+                    onTriggerAnimation.Invoke(view, new object[] { trigger });
+                    invoked.Add(onTriggerAnimation.Name);
+                    delivered = true;
+                }
+                catch (Exception ex)
+                {
+                    invoked.Add(onTriggerAnimation.Name + "-failed=" + FormatReflectionExceptionDetail(ex));
+                }
+            }
+
+            if (!delivered && TryInvokeReplicationNativeAnimationController(view, trigger, out var nativeControllerDetail))
+            {
+                invoked.Add(nativeControllerDetail);
+                delivered = true;
+            }
+
+            if (!delivered)
+            {
+                var trySetTrigger = FindReplicationInstanceMethod(view.GetType(), "TrySetTrigger", new[] { typeof(string) });
+                if (trySetTrigger != null)
+                {
+                    trySetTrigger.Invoke(view, new object[] { trigger });
+                    invoked.Add(trySetTrigger.Name);
+                }
+                else if (TryReadInstanceMemberValue(view, "Animator", out var animatorValue) && animatorValue is Animator animatorFromProperty)
+                {
+                    animatorFromProperty.SetTrigger(trigger);
+                    invoked.Add("Animator.SetTrigger(property)");
+                }
+                else if (TryReadInstanceMemberValue(view, "animator", out animatorValue) && animatorValue is Animator animatorFromField)
+                {
+                    animatorFromField.SetTrigger(trigger);
+                    invoked.Add("Animator.SetTrigger(field)");
+                }
+            }
+
+            if (replicationConfigAnimationDiagnostics && TryGetReplicationViewEntityId(view, out var entityId))
+            {
+                var diagnostic = FormatReplicationAnimationDiagnostic(view, entityId, "client-semantic-work-visual-apply", trigger, includeParameters: true);
+                instance?.LogReplicationInfo("Going Cooperative replication animation diagnostic client " + diagnostic);
+            }
+
+            return invoked.Count == 0
+                ? "method-missing viewType=" + FormatShortTypeName(view.GetType())
+                : "methods=" + string.Join("+", invoked.ToArray());
+        }
+
         private static bool TryInvokeReplicationNativeAnimationController(object view, string trigger, out string detail)
         {
             detail = "AnimationController.unavailable";
@@ -8556,6 +8808,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 case "BuildGoal":
                 case "ConstructGoal":
                 case "ConstructionGoal":
+                case "ConstructBuildingGoal":
                     return "Building";
                 case "HaulGoal":
                 case "StoreResourceGoal":
@@ -8623,7 +8876,14 @@ namespace GoingCooperative.Plugin.BepInEx
             }
         }
 
-        private static string ApplyReplicationPuppetActionVisual(string entityId, string animationToken, string animatorStateDetail, string actionHandItemId, bool force, bool triggerAnimation)
+        private static string ApplyReplicationPuppetActionVisual(
+            string entityId,
+            string animationToken,
+            string animatorStateDetail,
+            string actionHandItemId,
+            bool force,
+            bool triggerAnimation,
+            bool semanticWorkPresentation = false)
         {
             if (string.IsNullOrWhiteSpace(animationToken))
             {
@@ -8660,7 +8920,9 @@ namespace GoingCooperative.Plugin.BepInEx
                     ? actionHandDetail
                     : "handItem=not-applied " + actionHandDetail;
                 var invokeDetail = triggerAnimation
-                    ? InvokeReplicationAgentViewAnimationTrigger(view, animationToken, animatorStateDetail)
+                    ? semanticWorkPresentation
+                        ? InvokeReplicationSemanticWorkAnimationTrigger(view, animationToken, animatorStateDetail)
+                        : InvokeReplicationAgentViewAnimationTrigger(view, animationToken, animatorStateDetail)
                     : replicationConfigActionAnimatorStateSampling && !string.IsNullOrWhiteSpace(animatorStateDetail)
                         ? "heartbeat-" + ApplyReplicationAnimatorStateDetail(view, animatorStateDetail)
                         : "animation-trigger-skipped heartbeat/reassert";
@@ -8678,6 +8940,14 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static string ClearReplicationPuppetActionVisual(string entityId)
         {
+            if (replicationConfigCombatReplication
+                && replicationConfigCombatPresentationReplication
+                && (ReplicationCombatClientChargeByEntityId.ContainsKey(entityId)
+                    || ReplicationCombatPresentationExpiryByEntityId.ContainsKey(entityId)))
+            {
+                return "clear-skipped active-combat-charge";
+            }
+
             if (!TryFindReplicationAnimatedAgentViewByEntityId(entityId, out var view, out var viewDetail) || view == null)
             {
                 return "clear-view-missing " + viewDetail;
@@ -9067,6 +9337,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 case "BuildGoal":
                 case "ConstructGoal":
                 case "ConstructionGoal":
+                case "ConstructBuildingGoal":
                     return "Build";
                 case "HaulGoal":
                 case "StoreResourceGoal":
@@ -9262,17 +9533,25 @@ namespace GoingCooperative.Plugin.BepInEx
                 ? Math.Max(250, parsedTtlMs)
                 : ReplicationPuppetActionTtlMs;
             var animatorStateDetail = ExtractReplicationAnimatorStateDetail(delta.Detail);
+            var semanticUiOnly = replicationConfigSemanticAgentPresentation
+                && IsReplicationSemanticMigratedWorkGoal(goalId);
 
             statusText = NormalizeReplicationAgentActionStatusText(statusText, hasStarted);
             var isHeartbeat = string.Equals(delta.DeltaKind, "AgentActionHeartbeat", StringComparison.Ordinal);
             var shouldTriggerAnimation = !isHeartbeat;
             var shouldApplyUi = !isHeartbeat;
             var shouldApplyVisual = !isHeartbeat;
+            if (semanticUiOnly)
+            {
+                shouldTriggerAnimation = false;
+                shouldApplyVisual = false;
+            }
 
             lock (ReplicationWorldObjectDeltaLock)
             {
                 ReplicationPuppetActionState previousPuppetState;
-                if (!shouldTriggerAnimation
+                if (!semanticUiOnly
+                    && !shouldTriggerAnimation
                     && hasStarted
                     && !IsReplicationIdleActionStatus(goalId, statusText)
                     && ReplicationPuppetActionStateByEntityId.TryGetValue(entityId, out previousPuppetState))
@@ -9283,7 +9562,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     shouldApplyUi = shouldTriggerAnimation;
                     shouldApplyVisual = shouldTriggerAnimation;
                 }
-                else if (isHeartbeat)
+                else if (!semanticUiOnly && isHeartbeat)
                 {
                     shouldApplyUi = hasStarted && !IsReplicationIdleActionStatus(goalId, statusText);
                     shouldApplyVisual = shouldApplyUi;
@@ -9298,7 +9577,11 @@ namespace GoingCooperative.Plugin.BepInEx
                     animatorStateDetail,
                     actionHandItemId);
 
-                if (hasStarted && !IsReplicationIdleActionStatus(goalId, statusText))
+                if (semanticUiOnly)
+                {
+                    ReplicationPuppetActionStateByEntityId.Remove(entityId);
+                }
+                else if (hasStarted && !IsReplicationIdleActionStatus(goalId, statusText))
                 {
                     if (isHeartbeat
                         && !shouldTriggerAnimation
@@ -9336,7 +9619,9 @@ namespace GoingCooperative.Plugin.BepInEx
                 : !hasStarted || IsReplicationIdleActionStatus(goalId, statusText)
                     ? ClearReplicationPuppetActionVisual(entityId)
                     : "unchanged";
-            var playbackDetail = TryStartReplicationHostDrivenGoapPlayback(entityId, goalId, hasStarted, isHeartbeat);
+            var playbackDetail = semanticUiOnly
+                ? "semantic-ui-only"
+                : TryStartReplicationHostDrivenGoapPlayback(entityId, goalId, hasStarted, isHeartbeat);
 
             detail = "ok agent-action-status entityId="
                 + entityId
@@ -10798,12 +11083,15 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             ReadReplicationWorldObjectIdentity(target, ref targetId, ref targetBlueprintId, ref targetX, ref targetY, ref targetZ);
 
-            if (targetId != 0L || !string.IsNullOrWhiteSpace(targetBlueprintId) || targetX != 0 || targetY != 0 || targetZ != 0)
+            var nestedTargetNames = new[]
             {
-                return;
-            }
-
-            var nestedTargetNames = new[] { "Target", "target", "Object", "object", "WorldObject", "worldObject", "MapResource", "mapResource", "Resource", "resource", "Position", "position", "GridPosition", "gridPosition" };
+                "ObjectInstance", "objectInstance",
+                "ReachablePosition", "reachablePosition",
+                "PrecisePosition", "precisePosition",
+                "Target", "target", "Object", "object", "WorldObject", "worldObject",
+                "MapResource", "mapResource", "Resource", "resource",
+                "Position", "position", "GridPosition", "gridPosition"
+            };
             for (var i = 0; i < nestedTargetNames.Length; i++)
             {
                 if (!TryReadInstanceMemberValue(target, nestedTargetNames[i], out var nestedTarget) || nestedTarget == null)
@@ -10812,18 +11100,32 @@ namespace GoingCooperative.Plugin.BepInEx
                 }
 
                 ReadReplicationWorldObjectIdentity(nestedTarget, ref targetId, ref targetBlueprintId, ref targetX, ref targetY, ref targetZ);
-                if (targetId != 0L || !string.IsNullOrWhiteSpace(targetBlueprintId) || targetX != 0 || targetY != 0 || targetZ != 0)
-                {
-                    return;
-                }
             }
         }
 
         private static void ReadReplicationWorldObjectIdentity(object target, ref long targetId, ref string targetBlueprintId, ref int targetX, ref int targetY, ref int targetZ)
         {
-            TryReadReplicationWorldObjectLongMember(target, "UniqueId", "uniqueId", out targetId);
-            TryReadReplicationWorldObjectStringMember(target, "BlueprintId", "blueprintId", out targetBlueprintId);
-            TryReadReplicationWorldObjectGridPosition(target, out targetX, out targetY, out targetZ);
+            // TargetObject wrappers expose their coordinates while the durable
+            // object identity lives on ObjectInstance. Preserve fields already
+            // collected from a sibling/nested value instead of clearing them
+            // whenever the next value lacks that particular member.
+            if (TryReadReplicationWorldObjectLongMember(target, "UniqueId", "uniqueId", out var resolvedTargetId)
+                && resolvedTargetId != 0L)
+            {
+                targetId = resolvedTargetId;
+            }
+
+            if (TryReadReplicationWorldObjectStringMember(target, "BlueprintId", "blueprintId", out var resolvedBlueprintId))
+            {
+                targetBlueprintId = resolvedBlueprintId;
+            }
+
+            if (TryReadReplicationWorldObjectGridPosition(target, out var resolvedX, out var resolvedY, out var resolvedZ))
+            {
+                targetX = resolvedX;
+                targetY = resolvedY;
+                targetZ = resolvedZ;
+            }
         }
 
         private static bool TryGetCachedReplicationGoapActionEntityId(object action, out string entityId, out string detail)
@@ -12860,6 +13162,33 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static string FormatReplicationWorldObjectDeltaCoalesceKey(ReplicationWorldObjectDelta delta)
         {
+            if (string.Equals(delta.DeltaKind, CombatHealthDeltaKind, StringComparison.Ordinal))
+            {
+                // Health is current authoritative state. Preserve only the newest
+                // unapplied sample per entity while keeping outcomes/death as events.
+                return FormatReplicationEntityWorldObjectDeltaCoalesceKey(delta);
+            }
+
+            if (string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal)
+                && LockstepCommandPayloads.TryReadManagementPolicyPayload(
+                    delta.Detail,
+                    out var policy,
+                    out var targetId,
+                    out var key,
+                    out var index,
+                    out _,
+                    out _))
+            {
+                // Management deltas describe current state, not events. If several
+                // revisions arrive before the main thread can apply them, retaining
+                // only the newest value prevents stale UI edits from building a queue.
+                return ManagementDeltaKind
+                    + "|policy=" + policy
+                    + "|target=" + targetId
+                    + (string.Equals(policy, "AnimalOrder", StringComparison.Ordinal) ? string.Empty : "|key=" + key)
+                    + "|index=" + index.ToString(CultureInfo.InvariantCulture);
+            }
+
             if (string.Equals(delta.DeltaKind, "GameTimeSnapshot", StringComparison.Ordinal))
             {
                 return "GameTimeSnapshot";

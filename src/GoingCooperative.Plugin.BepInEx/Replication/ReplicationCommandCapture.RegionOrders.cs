@@ -82,6 +82,9 @@ namespace GoingCooperative.Plugin.BepInEx
             var contextualResourcePrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
                 nameof(ReplicationContextualResourceGiveOrderPrefix),
                 BindingFlags.Static | BindingFlags.NonPublic));
+            var fishingStatePostfix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationFishingStatePostfix),
+                BindingFlags.Static | BindingFlags.NonPublic));
             var contextualBuildingPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
                 nameof(ReplicationContextualBuildingDeconstructPrefix),
                 BindingFlags.Static | BindingFlags.NonPublic));
@@ -119,6 +122,7 @@ namespace GoingCooperative.Plugin.BepInEx
             patchedCount += TryPatchReplicationCommandCaptureMethodByTypeNames(harmonyInstance, stockpilePostfix, "NSMedieval.Stockpiles.StockpileManager", "SpawnStockpile", "NSMedieval.Stockpiles.Stockpile", "NSMedieval.Vec3Int", "NSMedieval.Vec3Int");
             patchedCount += TryPatchReplicationCommandCaptureMethod(harmonyInstance, zoneModifyPrefix, "NSMedieval.Stockpiles.StockpileView", "ExpandStockpile", Type.EmptyTypes);
             patchedCount += TryPatchReplicationCommandCaptureMethod(harmonyInstance, zoneModifyPrefix, "NSMedieval.Stockpiles.StockpileView", "ShrinkStockpile", Type.EmptyTypes);
+            patchedCount += TryPatchReplicationCommandCaptureMethodByTypeNames(harmonyInstance, fishingStatePostfix, "NSMedieval.State.MapResourceInstance", "SetCurrentOrder", "NSMedieval.Types.OrderType", "System.Boolean");
             patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(
                 harmonyInstance,
                 infoPanelActionPrefix,
@@ -492,6 +496,31 @@ namespace GoingCooperative.Plugin.BepInEx
                 "ContextualResource",
                 __instance.GetType().FullName ?? __instance.GetType().Name,
                 "contextual-resource:GiveOrder");
+        }
+
+        private static void ReplicationFishingStatePostfix(MethodBase __originalMethod, object __instance, object __0, bool __1)
+        {
+            if (!ShouldObserveReplicationRegionCommands()
+                || !replicationConfigHostMode
+                || __instance == null
+                || (__instance.GetType().FullName ?? string.Empty).IndexOf("FishMapResourceInstance", StringComparison.OrdinalIgnoreCase) < 0) return;
+            if (!TryResolveReplicationContextualObjectGrid(__instance, out var x, out var y, out var z, out var positionDetail))
+            {
+                instance?.LogReplicationWarning("Going Cooperative replication fishing host state skipped method="
+                    + (__originalMethod?.Name ?? string.Empty) + " detail=" + positionDetail);
+                return;
+            }
+            var nativeOrder = __0?.ToString() ?? string.Empty;
+            var cancelling = string.Equals(nativeOrder, "None", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(nativeOrder, "Cancel", StringComparison.OrdinalIgnoreCase)
+                || !__1;
+            instance?.SendReplicationRegionOrderState(
+                cancelling ? "Cancel" : "Fishing",
+                x, y, z, x, y, z,
+                "None",
+                "ContextualResource",
+                __instance.GetType().FullName ?? "FishMapResourceView",
+                "host-local source=fishing-model:" + (__originalMethod?.Name ?? string.Empty) + " nativeOrder=" + nativeOrder + " playerOrder=" + __1);
         }
 
         private static bool ReplicationInfoPanelActionPrefix(object __instance)
@@ -982,14 +1011,20 @@ namespace GoingCooperative.Plugin.BepInEx
 
             if (stockpile != null)
             {
-                var names = new[] { "UniqueId", "UniqueID", "ID", "Id", "id", "Guid", "guid" };
+                var names = new[] { "ObjectId", "objectId", "UniqueId", "UniqueID", "ID", "Id", "id", "Guid", "guid" };
                 for (var i = 0; i < names.Length; i++)
                 {
                     if (TryReadInstanceMemberValue(stockpile, names[i], out var value)
                         && value != null
                         && !string.IsNullOrWhiteSpace(value.ToString()))
                     {
-                        return value.ToString() ?? string.Empty;
+                        var id = value.ToString() ?? string.Empty;
+                        if (TryReadInstanceMemberValue(stockpile, "Start", out var start) && start != null
+                            && TryReadReplicationVec3Int(start, out var x, out var y, out var z))
+                        {
+                            return id + "@" + x.ToString(CultureInfo.InvariantCulture) + "," + y.ToString(CultureInfo.InvariantCulture) + "," + z.ToString(CultureInfo.InvariantCulture);
+                        }
+                        return id;
                     }
                 }
             }
@@ -1106,7 +1141,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
-            var orderType = ResolveReplicationResourceSurfaceOrderType(typeName, methodName);
+            var orderType = ResolveReplicationResourceSurfaceOrderType(typeName, methodName, __instance, __args);
             if (!replicationConfigHostMode && IsReplicationDigRegionOrder(orderType))
             {
                 return;
@@ -1626,8 +1661,19 @@ namespace GoingCooperative.Plugin.BepInEx
             return true;
         }
 
-        private static string ResolveReplicationResourceSurfaceOrderType(string typeName, string methodName)
+        private static string ResolveReplicationResourceSurfaceOrderType(string typeName, string methodName, object instance, object[] args)
         {
+            if ((instance?.GetType().FullName ?? string.Empty).IndexOf("FishMapResource", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                for (var i = 0; i < args.Length; i++)
+                {
+                    var native = args[i]?.ToString() ?? string.Empty;
+                    if (native.IndexOf("Fish", StringComparison.OrdinalIgnoreCase) >= 0) return "Fishing";
+                    if (native.IndexOf("Cancel", StringComparison.OrdinalIgnoreCase) >= 0) return "Cancel";
+                }
+                return methodName.IndexOf("Cancel", StringComparison.OrdinalIgnoreCase) >= 0 ? "Cancel" : "Fishing";
+            }
+
             if (typeName.IndexOf("PrioritiseHarvest", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return "Harvesting";
@@ -1661,6 +1707,11 @@ namespace GoingCooperative.Plugin.BepInEx
             if (IsReplicationRecentRegionOrder("Chopping"))
             {
                 return "Chopping";
+            }
+
+            if (IsReplicationRecentRegionOrder("Fishing"))
+            {
+                return "Fishing";
             }
 
             if (methodName.IndexOf("Chop", StringComparison.OrdinalIgnoreCase) >= 0)

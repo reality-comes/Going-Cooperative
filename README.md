@@ -102,6 +102,19 @@ Advanced users may edit this file for diagnostics or legacy config-driven
 testing. Setting `multiplayerMenu=false` restores that legacy workflow, where
 the values in the file are used directly.
 
+Semantic pawn and animal movement/work presentation is currently experimental
+and disabled in packaged releases. It adds host-authored gait/velocity metadata,
+bounded turn-aware path guidance, and ordered Chop/Build presentation lifecycles.
+Testers can opt in with:
+
+```ini
+semanticAgentPresentation=true
+```
+
+Set the same value on both computers and restart both games after changing it.
+The multiplayer handshake refuses mixed semantic/legacy settings. Setting the
+value to `false` restores the legacy movement and work-presentation path.
+
 The required runtime files are the plugin DLL under
 `BepInEx\plugins\GoingCooperative` and the global settings file under
 `GoingCooperative`.

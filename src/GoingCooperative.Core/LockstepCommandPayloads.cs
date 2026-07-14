@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 
 namespace GoingCooperative.Core
 {
@@ -16,6 +18,344 @@ namespace GoingCooperative.Core
         public const string EquipOrderAction = "EquipOrder";
         public const string ResearchActivateAction = "ResearchActivate";
         public const string ProductionQueueAction = "ProductionQueue";
+        public const string ManagementPolicyAction = "ManagementPolicy";
+        public const string DraftStateAction = "DraftState";
+        public const string DraftMoveAction = "DraftMove";
+        public const string CombatAttackAction = "CombatAttack";
+        public const string CombatCancelAction = "CombatCancel";
+        public const string CombatOutcomeAction = "CombatOutcome";
+        public const string CombatPresentationAction = "CombatPresentation";
+        public const string CombatPresentationChargeStartPhase = "ChargeStart";
+        public const string CombatPresentationWeaponReleasePhase = "WeaponRelease";
+        public const string CombatPresentationChargeEndPhase = "ChargeEnd";
+        public const string CombatPresentationAttackKindUnknown = "unknown";
+        public const string CombatPresentationAttackKindMelee = "melee";
+        public const string CombatPresentationAttackKindRanged = "ranged";
+        public const string CombatPresentationEndReasonNone = "none";
+        public const string CombatPresentationEndReasonCompleted = "completed";
+        public const string CombatPresentationEndReasonCancelled = "cancelled";
+        public const string CombatPresentationEndReasonStreamEnded = "stream-ended";
+        public const string CombatPresentationEndReasonWatchdog = "watchdog";
+
+        public static string CreateDraftStatePayload(string entityId, bool drafted, string combatMode)
+        {
+            return "{\"action\":\"" + DraftStateAction
+                + "\",\"entityId\":\"" + EscapeJsonString(entityId)
+                + "\",\"drafted\":" + (drafted ? "true" : "false")
+                + ",\"combatMode\":\"" + EscapeJsonString(combatMode)
+                + "\"}";
+        }
+
+        public static bool TryReadDraftStatePayload(
+            string payloadJson,
+            out string entityId,
+            out bool drafted,
+            out string combatMode)
+        {
+            var normalized = Normalize(payloadJson);
+            entityId = string.Empty;
+            drafted = false;
+            combatMode = string.Empty;
+            return HasAction(normalized, DraftStateAction)
+                && TryReadStringProperty(normalized, "entityId", out entityId)
+                && !string.IsNullOrWhiteSpace(entityId)
+                && TryReadBoolProperty(normalized, "drafted", out drafted)
+                && TryReadStringProperty(normalized, "combatMode", out combatMode);
+        }
+
+        public static string CreateDraftMovePayload(
+            string[] entityIds,
+            int targetX,
+            int targetY,
+            int targetZ,
+            string combatMode)
+        {
+            return "{\"action\":\"" + DraftMoveAction
+                + "\",\"entityIds\":" + CreateJsonStringArray(entityIds)
+                + ",\"targetX\":" + targetX.ToString(CultureInfo.InvariantCulture)
+                + ",\"targetY\":" + targetY.ToString(CultureInfo.InvariantCulture)
+                + ",\"targetZ\":" + targetZ.ToString(CultureInfo.InvariantCulture)
+                + ",\"combatMode\":\"" + EscapeJsonString(combatMode)
+                + "\"}";
+        }
+
+        public static bool TryReadDraftMovePayload(
+            string payloadJson,
+            out string[] entityIds,
+            out int targetX,
+            out int targetY,
+            out int targetZ,
+            out string combatMode)
+        {
+            var normalized = Normalize(payloadJson);
+            entityIds = Array.Empty<string>();
+            targetX = targetY = targetZ = 0;
+            combatMode = string.Empty;
+            return HasAction(normalized, DraftMoveAction)
+                && TryReadStringArrayProperty(normalized, "entityIds", out entityIds)
+                && HasNonEmptyEntityIds(entityIds)
+                && TryReadIntProperty(normalized, "targetX", out targetX)
+                && TryReadIntProperty(normalized, "targetY", out targetY)
+                && TryReadIntProperty(normalized, "targetZ", out targetZ)
+                && TryReadStringProperty(normalized, "combatMode", out combatMode);
+        }
+
+        public static string CreateCombatAttackPayload(
+            string[] attackerEntityIds,
+            string targetKind,
+            string targetId,
+            int targetX,
+            int targetY,
+            int targetZ)
+        {
+            return "{\"action\":\"" + CombatAttackAction
+                + "\",\"attackerEntityIds\":" + CreateJsonStringArray(attackerEntityIds)
+                + ",\"targetKind\":\"" + EscapeJsonString(targetKind)
+                + "\",\"targetId\":\"" + EscapeJsonString(targetId)
+                + "\",\"targetX\":" + targetX.ToString(CultureInfo.InvariantCulture)
+                + ",\"targetY\":" + targetY.ToString(CultureInfo.InvariantCulture)
+                + ",\"targetZ\":" + targetZ.ToString(CultureInfo.InvariantCulture)
+                + "}";
+        }
+
+        public static bool TryReadCombatAttackPayload(
+            string payloadJson,
+            out string[] attackerEntityIds,
+            out string targetKind,
+            out string targetId,
+            out int targetX,
+            out int targetY,
+            out int targetZ)
+        {
+            var normalized = Normalize(payloadJson);
+            attackerEntityIds = Array.Empty<string>();
+            targetKind = targetId = string.Empty;
+            targetX = targetY = targetZ = 0;
+            return HasAction(normalized, CombatAttackAction)
+                && TryReadStringArrayProperty(normalized, "attackerEntityIds", out attackerEntityIds)
+                && HasNonEmptyEntityIds(attackerEntityIds)
+                && TryReadStringProperty(normalized, "targetKind", out targetKind)
+                && !string.IsNullOrWhiteSpace(targetKind)
+                && TryReadStringProperty(normalized, "targetId", out targetId)
+                && TryReadIntProperty(normalized, "targetX", out targetX)
+                && TryReadIntProperty(normalized, "targetY", out targetY)
+                && TryReadIntProperty(normalized, "targetZ", out targetZ);
+        }
+
+        public static string CreateCombatCancelPayload(string[] attackerEntityIds)
+        {
+            return "{\"action\":\"" + CombatCancelAction
+                + "\",\"attackerEntityIds\":" + CreateJsonStringArray(attackerEntityIds)
+                + "}";
+        }
+
+        public static bool TryReadCombatCancelPayload(string payloadJson, out string[] attackerEntityIds)
+        {
+            var normalized = Normalize(payloadJson);
+            attackerEntityIds = Array.Empty<string>();
+            return HasAction(normalized, CombatCancelAction)
+                && TryReadStringArrayProperty(normalized, "attackerEntityIds", out attackerEntityIds)
+                && HasNonEmptyEntityIds(attackerEntityIds);
+        }
+
+        public static string CreateCombatOutcomePayload(
+            string outcomeId,
+            long authoritativeTick,
+            string attackerEntityId,
+            string targetKind,
+            string targetId,
+            int targetX,
+            int targetY,
+            int targetZ,
+            string outcomeType,
+            double amount,
+            string bodyPart,
+            string effectId,
+            bool lethal)
+        {
+            return "{\"action\":\"" + CombatOutcomeAction
+                + "\",\"outcomeId\":\"" + EscapeJsonString(outcomeId)
+                + "\",\"authoritativeTick\":" + authoritativeTick.ToString(CultureInfo.InvariantCulture)
+                + ",\"attackerEntityId\":\"" + EscapeJsonString(attackerEntityId)
+                + "\",\"targetKind\":\"" + EscapeJsonString(targetKind)
+                + "\",\"targetId\":\"" + EscapeJsonString(targetId)
+                + "\",\"targetX\":" + targetX.ToString(CultureInfo.InvariantCulture)
+                + ",\"targetY\":" + targetY.ToString(CultureInfo.InvariantCulture)
+                + ",\"targetZ\":" + targetZ.ToString(CultureInfo.InvariantCulture)
+                + ",\"outcomeType\":\"" + EscapeJsonString(outcomeType)
+                + "\",\"amount\":" + amount.ToString("R", CultureInfo.InvariantCulture)
+                + ",\"bodyPart\":\"" + EscapeJsonString(bodyPart)
+                + "\",\"effectId\":\"" + EscapeJsonString(effectId)
+                + "\",\"lethal\":" + (lethal ? "true" : "false")
+                + "}";
+        }
+
+        public static bool TryReadCombatOutcomePayload(
+            string payloadJson,
+            out string outcomeId,
+            out long authoritativeTick,
+            out string attackerEntityId,
+            out string targetKind,
+            out string targetId,
+            out int targetX,
+            out int targetY,
+            out int targetZ,
+            out string outcomeType,
+            out double amount,
+            out string bodyPart,
+            out string effectId,
+            out bool lethal)
+        {
+            var normalized = Normalize(payloadJson);
+            outcomeId = attackerEntityId = targetKind = targetId = outcomeType = bodyPart = effectId = string.Empty;
+            authoritativeTick = 0;
+            targetX = targetY = targetZ = 0;
+            amount = 0;
+            lethal = false;
+            return HasAction(normalized, CombatOutcomeAction)
+                && TryReadStringProperty(normalized, "outcomeId", out outcomeId)
+                && !string.IsNullOrWhiteSpace(outcomeId)
+                && TryReadLongProperty(normalized, "authoritativeTick", out authoritativeTick)
+                && authoritativeTick >= 0
+                && TryReadStringProperty(normalized, "attackerEntityId", out attackerEntityId)
+                && TryReadStringProperty(normalized, "targetKind", out targetKind)
+                && !string.IsNullOrWhiteSpace(targetKind)
+                && TryReadStringProperty(normalized, "targetId", out targetId)
+                && TryReadIntProperty(normalized, "targetX", out targetX)
+                && TryReadIntProperty(normalized, "targetY", out targetY)
+                && TryReadIntProperty(normalized, "targetZ", out targetZ)
+                && TryReadStringProperty(normalized, "outcomeType", out outcomeType)
+                && !string.IsNullOrWhiteSpace(outcomeType)
+                && TryReadDoubleProperty(normalized, "amount", out amount)
+                && !double.IsNaN(amount)
+                && !double.IsInfinity(amount)
+                && TryReadStringProperty(normalized, "bodyPart", out bodyPart)
+                && TryReadStringProperty(normalized, "effectId", out effectId)
+                && TryReadBoolProperty(normalized, "lethal", out lethal);
+        }
+
+        public static string CreateCombatPresentationPayload(
+            string chargeId,
+            long authoritativeTick,
+            string attackerEntityId,
+            string phase,
+            string attackKind,
+            double durationSeconds,
+            string animationToken,
+            int weaponType,
+            int attackRnd,
+            string endReason)
+        {
+            return "{\"action\":\"" + CombatPresentationAction
+                + "\",\"chargeId\":\"" + EscapeJsonString(chargeId)
+                + "\",\"authoritativeTick\":" + authoritativeTick.ToString(CultureInfo.InvariantCulture)
+                + ",\"attackerEntityId\":\"" + EscapeJsonString(attackerEntityId)
+                + "\",\"phase\":\"" + EscapeJsonString(phase)
+                + "\",\"attackKind\":\"" + EscapeJsonString(attackKind)
+                + "\",\"durationSeconds\":" + durationSeconds.ToString("R", CultureInfo.InvariantCulture)
+                + ",\"animationToken\":\"" + EscapeJsonString(animationToken)
+                + "\",\"weaponType\":" + weaponType.ToString(CultureInfo.InvariantCulture)
+                + ",\"attackRnd\":" + attackRnd.ToString(CultureInfo.InvariantCulture)
+                + ",\"endReason\":\"" + EscapeJsonString(endReason)
+                + "\"}";
+        }
+
+        public static bool TryReadCombatPresentationPayload(
+            string payloadJson,
+            out string chargeId,
+            out long authoritativeTick,
+            out string attackerEntityId,
+            out string phase,
+            out string attackKind,
+            out double durationSeconds,
+            out string animationToken,
+            out int weaponType,
+            out int attackRnd,
+            out string endReason)
+        {
+            var normalized = Normalize(payloadJson);
+            chargeId = attackerEntityId = phase = attackKind = animationToken = endReason = string.Empty;
+            authoritativeTick = 0;
+            durationSeconds = 0;
+            weaponType = attackRnd = 0;
+
+            if (!HasAction(normalized, CombatPresentationAction)
+                || !TryReadStringProperty(normalized, "chargeId", out chargeId)
+                || string.IsNullOrWhiteSpace(chargeId)
+                || !TryReadLongProperty(normalized, "authoritativeTick", out authoritativeTick)
+                || authoritativeTick < 0
+                || !TryReadStringProperty(normalized, "attackerEntityId", out attackerEntityId)
+                || string.IsNullOrWhiteSpace(attackerEntityId)
+                || !TryReadStringProperty(normalized, "phase", out phase)
+                || !IsCombatPresentationPhase(phase)
+                || !TryReadStringProperty(normalized, "attackKind", out attackKind)
+                || !IsCombatPresentationAttackKind(attackKind)
+                || !TryReadDoubleProperty(normalized, "durationSeconds", out durationSeconds)
+                || double.IsNaN(durationSeconds)
+                || double.IsInfinity(durationSeconds)
+                || durationSeconds < 0
+                || (string.Equals(phase, CombatPresentationChargeStartPhase, StringComparison.Ordinal)
+                    && durationSeconds <= 0)
+                || !TryReadIntProperty(normalized, "weaponType", out weaponType)
+                || !TryReadIntProperty(normalized, "attackRnd", out attackRnd)
+                || !TryReadStringProperty(normalized, "endReason", out endReason)
+                || !IsCombatPresentationEndReason(endReason))
+            {
+                return false;
+            }
+
+            var animationTokenPresent = normalized.IndexOf("\"animationToken\":", StringComparison.Ordinal) >= 0;
+            var hasAnimationToken = TryReadStringProperty(normalized, "animationToken", out animationToken);
+            return (!animationTokenPresent || hasAnimationToken)
+                && (!string.Equals(phase, CombatPresentationChargeStartPhase, StringComparison.Ordinal)
+                    || (hasAnimationToken && !string.IsNullOrWhiteSpace(animationToken)));
+        }
+
+        private static bool IsCombatPresentationPhase(string phase)
+        {
+            return string.Equals(phase, CombatPresentationChargeStartPhase, StringComparison.Ordinal)
+                || string.Equals(phase, CombatPresentationWeaponReleasePhase, StringComparison.Ordinal)
+                || string.Equals(phase, CombatPresentationChargeEndPhase, StringComparison.Ordinal);
+        }
+
+        private static bool IsCombatPresentationAttackKind(string attackKind)
+        {
+            return string.Equals(attackKind, CombatPresentationAttackKindUnknown, StringComparison.Ordinal)
+                || string.Equals(attackKind, CombatPresentationAttackKindMelee, StringComparison.Ordinal)
+                || string.Equals(attackKind, CombatPresentationAttackKindRanged, StringComparison.Ordinal);
+        }
+
+        private static bool IsCombatPresentationEndReason(string endReason)
+        {
+            return string.Equals(endReason, CombatPresentationEndReasonCompleted, StringComparison.Ordinal)
+                || string.Equals(endReason, CombatPresentationEndReasonCancelled, StringComparison.Ordinal)
+                || string.Equals(endReason, CombatPresentationEndReasonStreamEnded, StringComparison.Ordinal)
+                || string.Equals(endReason, CombatPresentationEndReasonWatchdog, StringComparison.Ordinal)
+                || string.Equals(endReason, CombatPresentationEndReasonNone, StringComparison.Ordinal);
+        }
+
+        public static string CreateManagementPolicyPayload(string policy, string targetId, string key, int index, int value, bool enabled)
+        {
+            return "{\"action\":\"" + ManagementPolicyAction + "\",\"policy\":\"" + EscapeJsonString(policy)
+                + "\",\"targetId\":\"" + EscapeJsonString(targetId) + "\",\"key\":\"" + EscapeJsonString(key)
+                + "\",\"index\":" + index.ToString(CultureInfo.InvariantCulture) + ",\"value\":" + value.ToString(CultureInfo.InvariantCulture)
+                + ",\"enabled\":" + (enabled ? "true" : "false") + "}";
+        }
+
+        public static bool TryReadManagementPolicyPayload(string payloadJson, out string policy, out string targetId, out string key, out int index, out int value, out bool enabled)
+        {
+            var normalized = Normalize(payloadJson);
+            policy = targetId = key = string.Empty;
+            index = value = 0;
+            enabled = false;
+            return normalized.IndexOf("\"action\":\"" + ManagementPolicyAction + "\"", StringComparison.Ordinal) >= 0
+                && TryReadStringProperty(normalized, "policy", out policy)
+                && TryReadStringProperty(normalized, "targetId", out targetId)
+                && TryReadStringProperty(normalized, "key", out key)
+                && TryReadIntProperty(normalized, "index", out index)
+                && TryReadIntProperty(normalized, "value", out value)
+                && TryReadBoolProperty(normalized, "enabled", out enabled);
+        }
 
         public static string CreateResearchActivatePayload(string nodeId)
         {
@@ -172,13 +512,13 @@ namespace GoingCooperative.Core
         {
             paused = false;
             var normalized = Normalize(payloadJson);
-            if (normalized.Contains("\"paused\":true", StringComparison.Ordinal))
+            if (normalized.IndexOf("\"paused\":true", StringComparison.Ordinal) >= 0)
             {
                 paused = true;
                 return true;
             }
 
-            if (normalized.Contains("\"paused\":false", StringComparison.Ordinal))
+            if (normalized.IndexOf("\"paused\":false", StringComparison.Ordinal) >= 0)
             {
                 paused = false;
                 return true;
@@ -193,7 +533,7 @@ namespace GoingCooperative.Core
             action = string.Empty;
             var normalized = Normalize(payloadJson);
 
-            if (normalized.Contains("\"action\":\"" + SetSpeedNormalAction + "\"", StringComparison.Ordinal))
+            if (normalized.IndexOf("\"action\":\"" + SetSpeedNormalAction + "\"", StringComparison.Ordinal) >= 0)
             {
                 action = SetSpeedNormalAction;
                 speedIndex = NormalSpeedIndex;
@@ -220,7 +560,7 @@ namespace GoingCooperative.Core
             endZ = 0;
 
             var normalized = Normalize(payloadJson);
-            if (!normalized.Contains("\"action\":\"" + DigVoxelAction + "\"", StringComparison.Ordinal))
+            if (normalized.IndexOf("\"action\":\"" + DigVoxelAction + "\"", StringComparison.Ordinal) < 0)
             {
                 return false;
             }
@@ -254,7 +594,7 @@ namespace GoingCooperative.Core
             afterLoading = false;
 
             var normalized = Normalize(payloadJson);
-            if (!normalized.Contains("\"action\":\"" + PlaceBlueprintAction + "\"", StringComparison.Ordinal))
+            if (normalized.IndexOf("\"action\":\"" + PlaceBlueprintAction + "\"", StringComparison.Ordinal) < 0)
             {
                 return false;
             }
@@ -290,7 +630,7 @@ namespace GoingCooperative.Core
             worldZ = 0;
 
             var normalized = Normalize(payloadJson);
-            if (!normalized.Contains("\"action\":\"" + CutPlantAction + "\"", StringComparison.Ordinal))
+            if (normalized.IndexOf("\"action\":\"" + CutPlantAction + "\"", StringComparison.Ordinal) < 0)
             {
                 return false;
             }
@@ -330,7 +670,7 @@ namespace GoingCooperative.Core
             subType = string.Empty;
 
             var normalized = Normalize(payloadJson);
-            if (!normalized.Contains("\"action\":\"" + RegionOrderAction + "\"", StringComparison.Ordinal))
+            if (normalized.IndexOf("\"action\":\"" + RegionOrderAction + "\"", StringComparison.Ordinal) < 0)
             {
                 return false;
             }
@@ -362,7 +702,7 @@ namespace GoingCooperative.Core
             z = 0;
 
             var normalized = Normalize(payloadJson);
-            if (!normalized.Contains("\"action\":\"" + EquipOrderAction + "\"", StringComparison.Ordinal))
+            if (normalized.IndexOf("\"action\":\"" + EquipOrderAction + "\"", StringComparison.Ordinal) < 0)
             {
                 return false;
             }
@@ -376,16 +716,216 @@ namespace GoingCooperative.Core
 
         private static string EscapeJsonString(string value)
         {
-            return (value ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "\\\"");
+            var source = value ?? string.Empty;
+            var escaped = new StringBuilder(source.Length);
+            foreach (var ch in source)
+            {
+                switch (ch)
+                {
+                    case '\"':
+                        escaped.Append("\\\"");
+                        break;
+                    case '\\':
+                        escaped.Append("\\\\");
+                        break;
+                    case '\b':
+                        escaped.Append("\\b");
+                        break;
+                    case '\f':
+                        escaped.Append("\\f");
+                        break;
+                    case '\n':
+                        escaped.Append("\\n");
+                        break;
+                    case '\r':
+                        escaped.Append("\\r");
+                        break;
+                    case '\t':
+                        escaped.Append("\\t");
+                        break;
+                    default:
+                        if (ch < ' ')
+                        {
+                            escaped.Append("\\u");
+                            escaped.Append(((int)ch).ToString("x4", CultureInfo.InvariantCulture));
+                        }
+                        else
+                        {
+                            escaped.Append(ch);
+                        }
+
+                        break;
+                }
+            }
+
+            return escaped.ToString();
         }
 
         private static string Normalize(string payloadJson)
         {
-            return (payloadJson ?? string.Empty)
-                .Replace(" ", string.Empty)
-                .Replace("\r", string.Empty)
-                .Replace("\n", string.Empty)
-                .Replace("\t", string.Empty);
+            var source = payloadJson ?? string.Empty;
+            var normalized = new StringBuilder(source.Length);
+            var inString = false;
+            var escaped = false;
+            foreach (var ch in source)
+            {
+                if (inString)
+                {
+                    normalized.Append(ch);
+                    if (escaped)
+                    {
+                        escaped = false;
+                    }
+                    else if (ch == '\\')
+                    {
+                        escaped = true;
+                    }
+                    else if (ch == '\"')
+                    {
+                        inString = false;
+                    }
+
+                    continue;
+                }
+
+                if (ch == '\"')
+                {
+                    inString = true;
+                    normalized.Append(ch);
+                }
+                else if (!char.IsWhiteSpace(ch))
+                {
+                    normalized.Append(ch);
+                }
+            }
+
+            return normalized.ToString();
+        }
+
+        private static bool HasAction(string normalizedJson, string action)
+        {
+            return TryReadStringProperty(normalizedJson, "action", out var actualAction)
+                && string.Equals(actualAction, action, StringComparison.Ordinal);
+        }
+
+        private static string CreateJsonStringArray(string[] values)
+        {
+            var result = new StringBuilder("[");
+            var items = values ?? Array.Empty<string>();
+            for (var i = 0; i < items.Length; i++)
+            {
+                if (i > 0)
+                {
+                    result.Append(',');
+                }
+
+                result.Append('\"');
+                result.Append(EscapeJsonString(items[i]));
+                result.Append('\"');
+            }
+
+            result.Append(']');
+            return result.ToString();
+        }
+
+        private static bool HasNonEmptyEntityIds(string[] entityIds)
+        {
+            if (entityIds.Length == 0)
+            {
+                return false;
+            }
+
+            foreach (var entityId in entityIds)
+            {
+                if (string.IsNullOrWhiteSpace(entityId))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryReadStringArrayProperty(string normalizedJson, string propertyName, out string[] values)
+        {
+            values = Array.Empty<string>();
+            var marker = "\"" + propertyName + "\":[";
+            var position = normalizedJson.IndexOf(marker, StringComparison.Ordinal);
+            if (position < 0)
+            {
+                return false;
+            }
+
+            position += marker.Length;
+            var items = new List<string>();
+            if (position < normalizedJson.Length && normalizedJson[position] == ']')
+            {
+                values = items.ToArray();
+                return true;
+            }
+
+            while (position < normalizedJson.Length)
+            {
+                if (normalizedJson[position] != '\"')
+                {
+                    return false;
+                }
+
+                position++;
+                var start = position;
+                var escaped = false;
+                while (position < normalizedJson.Length)
+                {
+                    var ch = normalizedJson[position];
+                    if (escaped)
+                    {
+                        escaped = false;
+                        position++;
+                        continue;
+                    }
+
+                    if (ch == '\\')
+                    {
+                        escaped = true;
+                        position++;
+                        continue;
+                    }
+
+                    if (ch == '\"')
+                    {
+                        if (!TryUnescapeJsonString(normalizedJson.Substring(start, position - start), out var item))
+                        {
+                            return false;
+                        }
+
+                        items.Add(item);
+                        position++;
+                        break;
+                    }
+
+                    position++;
+                }
+
+                if (position >= normalizedJson.Length)
+                {
+                    return false;
+                }
+
+                if (normalizedJson[position] == ']')
+                {
+                    values = items.ToArray();
+                    return true;
+                }
+
+                if (normalizedJson[position] != ',')
+                {
+                    return false;
+                }
+
+                position++;
+            }
+
+            return false;
         }
 
         private static bool TryReadIntProperty(string normalizedJson, string propertyName, out int value)
@@ -409,18 +949,72 @@ namespace GoingCooperative.Core
                 && int.TryParse(normalizedJson.Substring(start, end - start), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
         }
 
+        private static bool TryReadLongProperty(string normalizedJson, string propertyName, out long value)
+        {
+            value = 0;
+            if (!TryReadNumberToken(normalizedJson, propertyName, out var token))
+            {
+                return false;
+            }
+
+            return long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+        }
+
+        private static bool TryReadDoubleProperty(string normalizedJson, string propertyName, out double value)
+        {
+            value = 0;
+            if (!TryReadNumberToken(normalizedJson, propertyName, out var token))
+            {
+                return false;
+            }
+
+            return double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+        }
+
+        private static bool TryReadNumberToken(string normalizedJson, string propertyName, out string token)
+        {
+            token = string.Empty;
+            var marker = "\"" + propertyName + "\":";
+            var start = normalizedJson.IndexOf(marker, StringComparison.Ordinal);
+            if (start < 0)
+            {
+                return false;
+            }
+
+            start += marker.Length;
+            var end = start;
+            while (end < normalizedJson.Length)
+            {
+                var ch = normalizedJson[end];
+                if (!(char.IsDigit(ch) || ch == '-' || ch == '+' || ch == '.' || ch == 'e' || ch == 'E'))
+                {
+                    break;
+                }
+
+                end++;
+            }
+
+            if (end <= start)
+            {
+                return false;
+            }
+
+            token = normalizedJson.Substring(start, end - start);
+            return true;
+        }
+
         private static bool TryReadBoolProperty(string normalizedJson, string propertyName, out bool value)
         {
             value = false;
             var trueMarker = "\"" + propertyName + "\":true";
-            if (normalizedJson.Contains(trueMarker, StringComparison.Ordinal))
+            if (normalizedJson.IndexOf(trueMarker, StringComparison.Ordinal) >= 0)
             {
                 value = true;
                 return true;
             }
 
             var falseMarker = "\"" + propertyName + "\":false";
-            if (normalizedJson.Contains(falseMarker, StringComparison.Ordinal))
+            if (normalizedJson.IndexOf(falseMarker, StringComparison.Ordinal) >= 0)
             {
                 value = false;
                 return true;
@@ -461,14 +1055,68 @@ namespace GoingCooperative.Core
 
                 if (ch == '"')
                 {
-                    value = normalizedJson.Substring(start, end - start).Replace("\\\"", "\"").Replace("\\\\", "\\");
-                    return true;
+                    return TryUnescapeJsonString(normalizedJson.Substring(start, end - start), out value);
                 }
 
                 end++;
             }
 
             return false;
+        }
+
+        private static bool TryUnescapeJsonString(string escapedValue, out string value)
+        {
+            var result = new StringBuilder(escapedValue.Length);
+            for (var i = 0; i < escapedValue.Length; i++)
+            {
+                var ch = escapedValue[i];
+                if (ch != '\\')
+                {
+                    if (ch < ' ')
+                    {
+                        value = string.Empty;
+                        return false;
+                    }
+
+                    result.Append(ch);
+                    continue;
+                }
+
+                if (++i >= escapedValue.Length)
+                {
+                    value = string.Empty;
+                    return false;
+                }
+
+                switch (escapedValue[i])
+                {
+                    case '"': result.Append('"'); break;
+                    case '\\': result.Append('\\'); break;
+                    case '/': result.Append('/'); break;
+                    case 'b': result.Append('\b'); break;
+                    case 'f': result.Append('\f'); break;
+                    case 'n': result.Append('\n'); break;
+                    case 'r': result.Append('\r'); break;
+                    case 't': result.Append('\t'); break;
+                    case 'u':
+                        if (i + 4 >= escapedValue.Length
+                            || !int.TryParse(escapedValue.Substring(i + 1, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var codePoint))
+                        {
+                            value = string.Empty;
+                            return false;
+                        }
+
+                        result.Append((char)codePoint);
+                        i += 4;
+                        break;
+                    default:
+                        value = string.Empty;
+                        return false;
+                }
+            }
+
+            value = result.ToString();
+            return true;
         }
     }
 }
