@@ -193,6 +193,9 @@ namespace GoingCooperative.Plugin.BepInEx
         private void StartMultiplayerNativeCheckpointLoad(VillageSaveInfo save)
         {
             LogReplicationInfo("Going Cooperative synchronized native checkpoint loading save=" + save.FilePath + " epoch=" + multiplayerSaveTransfer.Epoch);
+            ResetReplicationEventRuntimeState(ReplicationTraderPartyResetContext.WorldReloadPending);
+            replicationClientEventAuthorityParked = !replicationConfigHostMode && FullEventGraphAuthorityEnabled();
+            replicationClientWeatherAuthorityParked = !replicationConfigHostMode && WeatherScheduleLaneEnabled();
             multiplayerLoadingInProgress = true;
             multiplayerNativeLoadStartedRealtime = Time.realtimeSinceStartup;
             replicationConfigEnabled = false;
@@ -235,6 +238,11 @@ namespace GoingCooperative.Plugin.BepInEx
             multiplayerLoadInvoked = false;
             replicationConfigEnabled = false;
             multiplayerSaveTransfer.NotifyNativeLoadFinished();
+            replicationNextEventCheckpointRealtime = 0f;
+            replicationNextWeatherCheckpointRealtime = 0f;
+            replicationNextWeatherEnvironmentRealtime = 0f;
+            replicationLastWeatherScheduleSignature = string.Empty;
+            replicationLastWeatherEnvironmentSignature = string.Empty;
             LogReplicationInfo("Going Cooperative synchronized loading finished afterLoad=" + afterLoad);
         }
 
@@ -255,8 +263,10 @@ namespace GoingCooperative.Plugin.BepInEx
             multiplayerResyncCaptureInProgress = true;
             try
             {
+                if (!FlushHostTraderPartyAbortsBeforeCheckpoint(out var abortFlushDetail))
+                    throw new InvalidOperationException("Trader abort cleanup is incomplete before checkpoint: " + abortFlushDetail);
                 replicationConfigEnabled = false;
-                StopReplicationRuntime();
+                StopReplicationRuntime(ReplicationTraderPartyResetContext.WorldReloadPending);
                 TryInvokeStoredGameSpeedManagerMethod("SetSpeedPause", out var pauseDetail);
                 var filename = "GoingCooperative_Resync_" + DateTime.UtcNow.ToString("yyyyMMdd_HHmmssfff");
                 var checkpoint = GlobalSaveController.Instance.SaveCurrentVillage(filename);
@@ -279,15 +289,25 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void RequestFullMultiplayerResync()
         {
-            if (!multiplayerSaveTransfer.RequestFullResync(out var error))
+            if (!TryRequestFullMultiplayerResync(out var error))
             {
                 MultiplayerMenu.StatusMessage = error;
                 SetMultiplayerCanvasMessage(error);
-                return;
             }
+        }
+
+        private bool TryRequestFullMultiplayerResync(out string error)
+        {
+            if (!multiplayerSaveTransfer.RequestFullResync(out error))
+            {
+                return false;
+            }
+
             replicationConfigEnabled = false;
-            StopReplicationRuntime();
+            StopReplicationRuntime(ReplicationTraderPartyResetContext.WorldReloadPending);
             MultiplayerMenu.StatusMessage = "Full resync requested. Waiting for the host checkpoint.";
+            error = string.Empty;
+            return true;
         }
     }
 }

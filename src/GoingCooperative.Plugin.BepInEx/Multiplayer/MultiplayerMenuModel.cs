@@ -11,8 +11,18 @@ namespace GoingCooperative.Plugin.BepInEx
         Settings
     }
 
+    internal enum MultiplayerConnectionMode
+    {
+        Direct,
+        Steam
+    }
+
     internal sealed class MultiplayerMenuModel
     {
+        public MultiplayerConnectionMode ConnectionMode { get; set; } = MultiplayerConnectionMode.Direct;
+
+        public string SteamHostIdText { get; set; } = string.Empty;
+
         public bool IsOpen { get; set; }
 
         public bool IsInitialized { get; set; }

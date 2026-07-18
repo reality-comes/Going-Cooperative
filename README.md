@@ -19,6 +19,8 @@ Every computer needs:
 
 The host must accept inbound UDP traffic on port `47692`. Internet play normally requires a VPN such as Tailscale or Radmin VPN, or correctly configured UDP port forwarding.
 
+**Steam mode (experimental):** with `steamNetworking=true` in `replication.cfg` on both computers (Steam builds of the game only), the multiplayer menu offers a Steam connection mode with friends-only lobbies and overlay invites. Traffic travels through Steam's relay, so no port forwarding or VPN is required. The redesigned menu is the default; set `ui=classic` in `replication.cfg` to restore the previous menu.
+
 ## Player installation
 
 ### 1. Find the Going Medieval directory
@@ -104,7 +106,9 @@ the values in the file are used directly.
 
 Semantic pawn and animal movement/work presentation is currently experimental
 and disabled in packaged releases. It adds host-authored gait/velocity metadata,
-bounded turn-aware path guidance, and ordered Chop/Build presentation lifecycles.
+bounded turn-aware path guidance, and ordered presentation lifecycles for
+chopping, construction, digging, harvesting/cutting, deconstruction, repair,
+uninstalling, and crop planting.
 Testers can opt in with:
 
 ```ini

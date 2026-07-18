@@ -51,10 +51,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 TryInstallReplicationGoapActionProbe(harmony);
                 TryInstallReplicationWorldObjectDeltaCapture(harmony);
                 TryInstallReplicationWorldObjectDeltaClientHooks(harmony);
+                TryInstallReplicationBuildingLifecycleV2Hooks(harmony);
                 TryInstallReplicationNeedsHooks(harmony);
                 TryInstallReplicationResultLifecycleProbes(harmony);
                 TryInstallReplicationCombatHooks(harmony);
                 TryInstallReplicationCombatDiagnostics(harmony);
+                TryInstallReplicationEventHooks(harmony);
+                TryInstallReplicationExternalEventAgentHooks(harmony);
                 TryInstallMultiplayerUiLifecyclePatches(harmony);
             }
 
@@ -102,7 +105,7 @@ namespace GoingCooperative.Plugin.BepInEx
 
             Camera.onPreCull -= OnReplicationCameraPreCull;
             multiplayerSaveTransfer.Dispose();
-            StopReplicationRuntime();
+            StopReplicationRuntime(ReplicationTraderPartyResetContext.WorldReloadPending);
             if (harmony != null)
             {
                 try

@@ -32,10 +32,19 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigAnimateReplicatedMovement = true;
         private static bool replicationConfigSmoothReplicatedMovement = true;
         private static bool replicationConfigSemanticAgentPresentation;
+        // Narrow rollback gate for the Chop/Dig/Harvest client animation-cycle
+        // controller. False preserves the previous semantic work presentation.
+        private static bool replicationConfigSemanticWorkCycleDriver;
         private static bool replicationConfigNeedsReplication = true;
         private static bool replicationConfigForceHostMovement;
         private static bool replicationConfigSendSnapshots = true;
         private static bool replicationConfigLogSnapshots = true;
+        // Full world-delta payload logging is intentionally opt-in. Building and roof
+        // records can be very large and are replicated in bursts during construction.
+        private static bool replicationConfigWorldObjectDeltaDiagnostics;
+        // Transactional placement plus sparse lifecycle replication. False restores
+        // the legacy periodic full-building snapshot lane for rollback testing.
+        private static bool replicationConfigBuildingReplicationV2 = true;
         private static bool replicationConfigValidateSnapshots = true;
         private static bool replicationConfigSendProofIntent;
         private static bool replicationConfigResultLifecycleProbes = true;
@@ -44,6 +53,12 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigCarryDiagnostics;
         private static bool replicationConfigGoapActionProbe;
         private static bool replicationConfigMultiplayerMenuEnabled = true;
+        // Multiplayer menu implementation. True renders the redesigned v2 menu;
+        // false restores the original Canvas menu unchanged (rollback path).
+        private static bool replicationConfigUiV2 = true;
+        // Steam networking master gate. Off by default; when on, the multiplayer
+        // menu offers a Steam connection mode (lobby, invites, relay tunnel).
+        private static bool replicationConfigSteamNetworking;
         private static bool replicationConfigPerfFpsProbe = true;
         private static bool replicationConfigResourcePileStateSnapshots;
         private static bool replicationConfigResourceContainerReplication;
@@ -61,6 +76,25 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigCombatProjectileReplication;
         private static bool replicationConfigCombatExternalAgentLifecycle;
         private static bool replicationConfigCombatDiagnostics;
+        // Scripted events and ambient weather are split into independently reversible
+        // layers. Trader starts have a narrow authority gate; replacing the complete
+        // scheduler or loaded/running event graph remains separately fail-closed.
+        private static bool replicationConfigEventReplication;
+        private static bool replicationConfigEventSchedulerAuthority;
+        private static bool replicationConfigEventTraderAuthority;
+        private static bool replicationConfigEventLifecycleReplication;
+        private static bool replicationConfigEventDialogReplication;
+        private static bool replicationConfigEventChoiceCommands;
+        private static bool replicationConfigEventSpeedReplication;
+        private static bool replicationConfigEventWarningReplication;
+        private static bool replicationConfigEventNoticeReplication;
+        private static bool replicationConfigEventExternalAgentLifecycle;
+        private static bool replicationConfigEventEnvironmentMutationReplication;
+        private static bool replicationConfigPlayerTriggeredEventReplication;
+        private static bool replicationConfigWeatherReplication;
+        private static bool replicationConfigWeatherSchedulerAuthority;
+        private static bool replicationConfigWeatherTemperatureReplication;
+        private static bool replicationConfigEventDiagnostics;
         private static string replicationConfigHost = "127.0.0.1";
         private static string replicationConfigProofIntent = "speed-normal";
         private static string replicationConfigCommandCaptureMode = "send";
@@ -160,6 +194,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigSmoothReplicatedMovement
                     + " semanticAgentPresentation="
                     + replicationConfigSemanticAgentPresentation
+                    + " semanticWorkCycleDriver="
+                    + replicationConfigSemanticWorkCycleDriver
                     + " needsReplication="
                     + replicationConfigNeedsReplication
                     + " interpolationMs="
@@ -194,6 +230,10 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigMultiplayerMenuEnabled
                     + " perfFpsProbe="
                     + replicationConfigPerfFpsProbe
+                    + " worldObjectDeltaDiagnostics="
+                    + replicationConfigWorldObjectDeltaDiagnostics
+                    + " buildingReplicationV2="
+                    + replicationConfigBuildingReplicationV2
                     + " resourcePileStateSnapshots="
                     + replicationConfigResourcePileStateSnapshots
                     + " resourceContainerReplication="
@@ -220,6 +260,38 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigCombatExternalAgentLifecycle
                     + " combatDiagnostics="
                     + replicationConfigCombatDiagnostics
+                    + " eventReplication="
+                    + replicationConfigEventReplication
+                    + " eventSchedulerAuthority="
+                    + replicationConfigEventSchedulerAuthority
+                    + " eventTraderAuthority="
+                    + replicationConfigEventTraderAuthority
+                    + " eventLifecycleReplication="
+                    + replicationConfigEventLifecycleReplication
+                    + " eventDialogReplication="
+                    + replicationConfigEventDialogReplication
+                    + " eventChoiceCommands="
+                    + replicationConfigEventChoiceCommands
+                    + " eventSpeedReplication="
+                    + replicationConfigEventSpeedReplication
+                    + " eventWarningReplication="
+                    + replicationConfigEventWarningReplication
+                    + " eventNoticeReplication="
+                    + replicationConfigEventNoticeReplication
+                    + " eventExternalAgentLifecycle="
+                    + replicationConfigEventExternalAgentLifecycle
+                    + " eventEnvironmentMutationReplication="
+                    + replicationConfigEventEnvironmentMutationReplication
+                    + " playerTriggeredEventReplication="
+                    + replicationConfigPlayerTriggeredEventReplication
+                    + " weatherReplication="
+                    + replicationConfigWeatherReplication
+                    + " weatherSchedulerAuthority="
+                    + replicationConfigWeatherSchedulerAuthority
+                    + " weatherTemperatureReplication="
+                    + replicationConfigWeatherTemperatureReplication
+                    + " eventDiagnostics="
+                    + replicationConfigEventDiagnostics
                     + " worldObjectDeltaApplyBudgetPerFrame="
                     + replicationConfigWorldObjectDeltaApplyBudgetPerFrame.ToString(CultureInfo.InvariantCulture)
                     + " worldObjectDeltaApplyQueueMax="
@@ -228,6 +300,74 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigWorldObjectDeltaApplyBudgetMsPerFrame.ToString("0.###", CultureInfo.InvariantCulture)
                     + " maxSnapshotEntities="
                     + replicationConfigMaxSnapshotEntities.ToString(CultureInfo.InvariantCulture));
+
+                current.Logger.LogInfo("Going Cooperative replication config ui="
+                    + (replicationConfigUiV2 ? "v2" : "classic")
+                    + " steamNetworking="
+                    + replicationConfigSteamNetworking);
+
+                if (replicationConfigEventReplication
+                    && replicationConfigEventSchedulerAuthority
+                    && (!replicationConfigEventLifecycleReplication
+                        || !string.Equals(replicationConfigWorldObjectDeltaMode, "apply", StringComparison.OrdinalIgnoreCase)))
+                {
+                    current.Logger.LogWarning("Going Cooperative event scheduler authority is dependency-gated off: eventLifecycleReplication=true and worldObjectDeltaMode=apply are required.");
+                }
+
+                if (replicationConfigEventReplication
+                    && replicationConfigEventTraderAuthority
+                    && (!replicationConfigEventLifecycleReplication
+                        || !string.Equals(replicationConfigWorldObjectDeltaMode, "apply", StringComparison.OrdinalIgnoreCase)))
+                {
+                    current.Logger.LogWarning("Going Cooperative trader event authority is dependency-gated off: eventLifecycleReplication=true and worldObjectDeltaMode=apply are required. Native trader events remain enabled.");
+                }
+
+                if (replicationConfigEventReplication
+                    && replicationConfigEventTraderAuthority
+                    && !ReplicationTraderPartySurfacesReady())
+                {
+                    current.Logger.LogWarning("Going Cooperative trader event authority remains source/surface-gated off because the exact trader-party snapshot, identity, spawn, removal, or trade-UI contract is incomplete. Native trader events remain enabled.");
+                }
+
+                if (replicationConfigEventReplication
+                    && replicationConfigEventChoiceCommands
+                    && !IsReplicationCaptureModeSendEnabled(replicationConfigCommandCaptureMode))
+                {
+                    current.Logger.LogWarning("Going Cooperative event choice commands are dependency-gated off: commandCaptureMode=send or authoritative is required.");
+                }
+
+                if (replicationConfigEventReplication
+                    && replicationConfigEventSchedulerAuthority
+                    && (!replicationConfigEventDialogReplication
+                        || !replicationConfigEventChoiceCommands
+                        || !replicationConfigEventSpeedReplication
+                        || !replicationConfigEventWarningReplication
+                        || !replicationConfigEventNoticeReplication
+                        || !replicationConfigMultiplayerMenuEnabled
+                        || !replicationConfigEventExternalAgentLifecycle
+                        || !replicationConfigCombatExternalAgentLifecycle
+                        || !replicationConfigEventEnvironmentMutationReplication))
+                {
+                    current.Logger.LogWarning("Going Cooperative full scripted-event graph authority is dependency-gated off: dialog, choice, speed, warning, notice, multiplayer UI, external-agent lifecycle, combat external-agent lifecycle, and environment-mutation lanes are required before the client scheduler or loaded/running event graphs can be parked. Trader authority is controlled independently by eventTraderAuthority.");
+                }
+
+                if (replicationConfigEventReplication && replicationConfigEventSchedulerAuthority
+                    && (!ReplicationEventExternalAgentLifecycleImplemented()
+                        || !ReplicationCombatExternalAgentLifecycleImplemented()
+                        || !ReplicationEventEnvironmentMutationImplemented()
+                        || !ReplicationEventWarningReplicationImplemented()
+                        || !ReplicationEventNoticeReplicationImplemented()))
+                {
+                    current.Logger.LogWarning("Going Cooperative full scripted-event graph authority remains source-gated off: external roster, environment mutation, warning, or notice implementations are not present in this build. Trader authority is controlled independently by eventTraderAuthority.");
+                }
+
+                if (replicationConfigWeatherReplication
+                    && replicationConfigWeatherSchedulerAuthority
+                    && (!replicationConfigEventEnvironmentMutationReplication
+                        || !ReplicationEventEnvironmentMutationImplemented()))
+                {
+                    current.Logger.LogWarning("Going Cooperative weather scheduler authority is dependency-gated off: an implemented environment-mutation lane is required before native weather effectors can be suppressed safely. Config booleans cannot bypass this safety gate.");
+                }
 
                 TryLoadDiagnosticsConfig(current);
             }
@@ -354,6 +494,18 @@ namespace GoingCooperative.Plugin.BepInEx
                     }
 
                     break;
+                case "semanticworkcycledriver":
+                case "workcycledriver":
+                    if (TryParseConfigBool(value, out var semanticWorkCycleDriver))
+                    {
+                        replicationConfigSemanticWorkCycleDriver = semanticWorkCycleDriver;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
                 case "needsreplication":
                 case "hungersleepreplication":
                 case "needsync":
@@ -420,6 +572,86 @@ namespace GoingCooperative.Plugin.BepInEx
                 case "combatdiagnostics":
                 case "combatprobes":
                     if (TryParseConfigBool(value, out var combatDiagnostics)) replicationConfigCombatDiagnostics = combatDiagnostics;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventreplication":
+                case "eventenabled":
+                    if (TryParseConfigBool(value, out var eventReplication)) replicationConfigEventReplication = eventReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventschedulerauthority":
+                case "eventauthority":
+                    if (TryParseConfigBool(value, out var eventSchedulerAuthority)) replicationConfigEventSchedulerAuthority = eventSchedulerAuthority;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventtraderauthority":
+                case "traderauthority":
+                    if (TryParseConfigBool(value, out var eventTraderAuthority)) replicationConfigEventTraderAuthority = eventTraderAuthority;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventlifecyclereplication":
+                case "eventlifecycle":
+                    if (TryParseConfigBool(value, out var eventLifecycleReplication)) replicationConfigEventLifecycleReplication = eventLifecycleReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventdialogreplication":
+                case "eventdialogs":
+                    if (TryParseConfigBool(value, out var eventDialogReplication)) replicationConfigEventDialogReplication = eventDialogReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventchoicecommands":
+                case "eventchoices":
+                    if (TryParseConfigBool(value, out var eventChoiceCommands)) replicationConfigEventChoiceCommands = eventChoiceCommands;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventspeedreplication":
+                case "eventspeed":
+                    if (TryParseConfigBool(value, out var eventSpeedReplication)) replicationConfigEventSpeedReplication = eventSpeedReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventwarningreplication":
+                case "eventwarnings":
+                    if (TryParseConfigBool(value, out var eventWarningReplication)) replicationConfigEventWarningReplication = eventWarningReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventnoticereplication":
+                case "eventnotices":
+                    if (TryParseConfigBool(value, out var eventNoticeReplication)) replicationConfigEventNoticeReplication = eventNoticeReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventexternalagentlifecycle":
+                case "eventexternalagents":
+                    if (TryParseConfigBool(value, out var eventExternalAgentLifecycle)) replicationConfigEventExternalAgentLifecycle = eventExternalAgentLifecycle;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventenvironmentmutationreplication":
+                case "eventenvironmentmutations":
+                    if (TryParseConfigBool(value, out var eventEnvironmentMutationReplication)) replicationConfigEventEnvironmentMutationReplication = eventEnvironmentMutationReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "playertriggeredeventreplication":
+                case "playertriggeredevents":
+                    if (TryParseConfigBool(value, out var playerTriggeredEventReplication)) replicationConfigPlayerTriggeredEventReplication = playerTriggeredEventReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "weatherreplication":
+                case "weatherenabled":
+                    if (TryParseConfigBool(value, out var weatherReplication)) replicationConfigWeatherReplication = weatherReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "weatherschedulerauthority":
+                case "weatherauthority":
+                    if (TryParseConfigBool(value, out var weatherSchedulerAuthority)) replicationConfigWeatherSchedulerAuthority = weatherSchedulerAuthority;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "weathertemperaturereplication":
+                case "weathertemperature":
+                    if (TryParseConfigBool(value, out var weatherTemperatureReplication)) replicationConfigWeatherTemperatureReplication = weatherTemperatureReplication;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "eventdiagnostics":
+                case "eventprobes":
+                    if (TryParseConfigBool(value, out var eventDiagnostics)) replicationConfigEventDiagnostics = eventDiagnostics;
                     else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
                     break;
                 case "applysnapshots":
@@ -644,6 +876,33 @@ namespace GoingCooperative.Plugin.BepInEx
                     }
 
                     break;
+
+                case "worldobjectdeltadiagnostics":
+                case "worlddeltadiagnostics":
+                case "verboseworlddeltas":
+                    if (TryParseConfigBool(value, out var worldObjectDeltaDiagnostics))
+                    {
+                        replicationConfigWorldObjectDeltaDiagnostics = worldObjectDeltaDiagnostics;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+
+                case "buildingreplicationv2":
+                case "transactionalbuildingreplication":
+                    if (TryParseConfigBool(value, out var buildingReplicationV2))
+                    {
+                        replicationConfigBuildingReplicationV2 = buildingReplicationV2;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
                 case "validatesnapshots":
                     if (TryParseConfigBool(value, out var validateSnapshots))
                     {
@@ -733,6 +992,38 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryParseConfigBool(value, out var multiplayerMenuEnabled))
                     {
                         replicationConfigMultiplayerMenuEnabled = multiplayerMenuEnabled;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "ui":
+                case "menuui":
+                case "multiplayerui":
+                    if (string.Equals(value, "v2", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(value, "modern", StringComparison.OrdinalIgnoreCase))
+                    {
+                        replicationConfigUiV2 = true;
+                    }
+                    else if (string.Equals(value, "classic", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(value, "v1", StringComparison.OrdinalIgnoreCase))
+                    {
+                        replicationConfigUiV2 = false;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "steamnetworking":
+                case "steam":
+                case "steamtransport":
+                    if (TryParseConfigBool(value, out var steamNetworking))
+                    {
+                        replicationConfigSteamNetworking = steamNetworking;
                     }
                     else
                     {

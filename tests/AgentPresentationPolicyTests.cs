@@ -41,9 +41,60 @@ internal static class AgentPresentationPolicyTests
         TestEndBeforeStart();
         TestEpochAndEntityIsolation();
         TestTeleportLifecycle();
+        TestSemanticWorkMappings();
+        TestSemanticAnimatorPolicy();
 
         Console.WriteLine(failures == 0 ? "PASS AgentPresentationPolicyTests" : "FAILED " + failures);
         return failures == 0 ? 0 : 1;
+    }
+
+    private static void TestSemanticWorkMappings()
+    {
+        AssertWork("ChopTreeGoal", "StartObtaining", "Chop", "Mining");
+        AssertWork("ConstructBuildingGoal", "ConstructAction", "Build", "Build");
+        AssertWork("DigGoal", "StartObtaining", "Dig", "Mining");
+        AssertWork("HarvestGoal", "StartObtaining", "Harvest", "Harvest");
+        AssertWork("FollowCutPlantOrderGoal", "EnemyCutPlant", "CutPlant", "Mining");
+        AssertWork("DeconstructGoal", "DeconstructAction", "Deconstruct", "Build");
+        AssertWork("RepairBuildingGoal", "RepairAction", "Repair", "Build");
+        AssertWork("UninstallBuildingGoal", "UninstallAction", "Uninstall", "Build");
+        AssertWork("PlantCropsGoal", "PlantCropsAction", "Plant", "Planting");
+
+        Equal(false, AgentWorkPresentationPolicy.TryResolve("DigGoal", "ConstructAction", out _), "semantic work rejects mismatched goal and action");
+        Equal(false, AgentWorkPresentationPolicy.IsCandidateAction("GoToTarget"), "navigation is not semantic work");
+        Equal(false, AgentWorkPresentationPolicy.IsMigratedGoal("AttackGoal"), "combat remains outside semantic work");
+    }
+
+    private static void AssertWork(
+        string goalId,
+        string actionId,
+        string expectedWorkKind,
+        string expectedAnimationToken)
+    {
+        Equal(true, AgentWorkPresentationPolicy.IsCandidateAction(actionId), goalId + " action is a semantic candidate");
+        Equal(true, AgentWorkPresentationPolicy.IsMigratedGoal(goalId), goalId + " is a migrated semantic goal");
+        Equal(true, AgentWorkPresentationPolicy.TryResolve(goalId, actionId, out var descriptor), goalId + " mapping resolves");
+        Equal(expectedWorkKind, descriptor.WorkKind, goalId + " work kind");
+        Equal(expectedAnimationToken, descriptor.DefaultAnimationToken, goalId + " default animation");
+        Equal(expectedAnimationToken, AgentWorkPresentationPolicy.GetDefaultAnimationToken(expectedWorkKind), goalId + " client animation fallback");
+    }
+
+    private static void TestSemanticAnimatorPolicy()
+    {
+        Equal(true, AgentWorkPresentationPolicy.ShouldReplayAnimatorLayer(true, 101, 101), "initial anchor establishes matching state once");
+        Equal(false, AgentWorkPresentationPolicy.ShouldReplayAnimatorLayer(false, 101, 101), "periodic anchor leaves aligned loop running");
+        Equal(true, AgentWorkPresentationPolicy.ShouldReplayAnimatorLayer(false, 101, 202), "periodic anchor repairs divergent state");
+        Equal(false, AgentWorkPresentationPolicy.ShouldReplayAnimatorLayer(false, 0, 202), "empty authoritative layer is never replayed");
+
+        Equal(false, AgentWorkPresentationPolicy.UsesClientTriggerMaintenance("Chop"), "chop remains on the proven semantic presentation path");
+        Equal(false, AgentWorkPresentationPolicy.UsesClientTriggerMaintenance("Dig"), "dig never uses fixed-rate trigger maintenance");
+        Equal(true, AgentWorkPresentationPolicy.UsesClientTriggerMaintenance("Harvest"), "harvest receives bounded trigger maintenance");
+        Equal(true, AgentWorkPresentationPolicy.UsesHostCyclePulse("Dig"), "dig follows authoritative host cycle pulses");
+        Equal(false, AgentWorkPresentationPolicy.UsesHostCyclePulse("Harvest"), "harvest does not emit redundant host cycle pulses");
+        Equal(true, AgentWorkPresentationPolicy.UsesClientStartConfirmation("Build"), "build receives one-shot start confirmation");
+        Equal(false, AgentWorkPresentationPolicy.UsesClientStartConfirmation("Chop"), "chop does not receive unproven start confirmation");
+        Equal(false, AgentWorkPresentationPolicy.UsesClientStartConfirmation("Dig"), "dig keeps its host-owned cycle path");
+        Equal(false, AgentWorkPresentationPolicy.IsCycleDriverScopedWork("Build"), "building remains outside initial cycle-driver scope");
     }
 
     private static void TestContracts()

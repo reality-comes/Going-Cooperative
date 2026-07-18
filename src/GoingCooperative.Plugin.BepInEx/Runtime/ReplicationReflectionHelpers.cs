@@ -161,14 +161,14 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             try
             {
-                var property = AccessTools.Property(owner.GetType(), memberName);
+                var property = GetCachedInstanceProperty(owner.GetType(), memberName);
                 if (property != null && property.CanWrite)
                 {
                     property.SetValue(owner, value, null);
                     return true;
                 }
 
-                var field = AccessTools.Field(owner.GetType(), memberName);
+                var field = GetCachedInstanceField(owner.GetType(), memberName);
                 if (field != null)
                 {
                     field.SetValue(owner, value);

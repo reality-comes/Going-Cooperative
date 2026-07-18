@@ -19,6 +19,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationRemoteHelloReceived;
         private static bool replicationRemoteCompatibilityRefused;
         private static string replicationLocalBuildHash = string.Empty;
+        private static string replicationGameAssemblyModuleVersionId = string.Empty;
         private static float replicationNextHelloRealtime;
         private static float replicationNextHelloLogRealtime;
         private static float replicationNextBuildHashMismatchWarnRealtime;
@@ -35,6 +36,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static float replicationNextAgentActionHeartbeatRealtime;
         private static float replicationNextAgentCharacterStateSnapshotRealtime;
         private static float replicationNextBuildingStateSnapshotRealtime;
+        private static float replicationNextBuildingStateRepairSnapshotRealtime;
         private static float replicationNextRegionOrderMarkerSnapshotRealtime;
         private static float replicationNextGameTimeSnapshotRealtime;
         private static int replicationLastRuntimeUpdateFrame = -1;
@@ -97,13 +99,20 @@ namespace GoingCooperative.Plugin.BepInEx
         private static float replicationLastRegionOrderStateRealtime;
         private static int replicationRegionOrderStateCaptureSuppressionDepth;
         private static int replicationLastApplyVisualMoving;
-        private static readonly HashSet<string> replicationHostCommandIntentKeys = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, ReplicationHostCommandResultRecord> replicationHostCommandIntentResults =
+            new Dictionary<string, ReplicationHostCommandResultRecord>(StringComparer.Ordinal);
+        private static readonly Queue<string> replicationHostCommandIntentResultOrder = new Queue<string>();
+        private static int replicationHostProtectedBuildBatchManifestCount;
+        private static readonly Dictionary<string, PendingReplicationCommandIntent> ReplicationPendingCommandIntents =
+            new Dictionary<string, PendingReplicationCommandIntent>(StringComparer.Ordinal);
         private static readonly List<ReplicationRegionOrderState> ReplicationRecentRegionOrderMarkerStates = new List<ReplicationRegionOrderState>();
         private const float ReplicationLocalCommandDuplicateWindowSeconds = 0.35f;
         private const float ReplicationRegionOrderDuplicateWindowSeconds = 3f;
         private const float ReplicationRegionOrderMarkerSnapshotSeconds = 3f;
         private const float ReplicationRegionOrderMarkerSnapshotRememberSeconds = 30f;
         private const int ReplicationRegionOrderMarkerSnapshotMaxStates = 64;
+        private const int ReplicationHostCommandResultRetention = 8192;
+        private const int ReplicationBuildingDurableBackpressureLimit = 16;
 
         private void TryStartReplicationRuntime()
         {
@@ -194,14 +203,18 @@ namespace GoingCooperative.Plugin.BepInEx
                     SendHostReplicationAgentCarryStateSnapshotIfDue();
                     SendHostReplicationAgentActionHeartbeatIfDue();
                     SendHostReplicationAgentCharacterStateSnapshotIfDue();
+                    UpdateReplicationBuildingLifecycleV2();
                     SendHostReplicationBuildingStateSnapshotIfDue();
                     SendHostReplicationGameTimeSnapshotIfDue();
+                    UpdateReplicationAnimalState();
                     SendPendingReplicationWorldObjectDeltasIfDue();
                 }
             }
             else
             {
+                UpdateReplicationBuildingLifecycleV2();
                 SendClientProofIntentIfDue();
+                SendPendingReplicationCommandIntentsIfDue();
                 ProcessReplicationResourcePileLocationIndex();
                 ProcessPendingReplicationWorldObjectDeltaApplies();
                 ProcessPendingReplicationResourceContainerApplies();
@@ -215,11 +228,18 @@ namespace GoingCooperative.Plugin.BepInEx
             ProcessReplicationSemanticAgentMotionPresentation();
             ProcessReplicationSemanticAgentWorkPresentation();
             ProcessReplicationCombatPresentationExpiry();
+            ProcessReplicationEventRuntime();
+            UpdateReplicationTraderPartyTransfers();
+
+            if (!replicationConfigHostMode && ProcessReplicationBuildBatchRecoveryRequest())
+            {
+                return;
+            }
 
             LogReplicationStatusIfDue();
         }
 
-        private static void StopReplicationRuntime()
+        private static void StopReplicationRuntime(ReplicationTraderPartyResetContext traderPartyResetContext)
         {
             replicationTransport?.Stop();
             replicationTransport = null;
@@ -229,8 +249,11 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationRemoteCompatibilityRefused = false;
             replicationLocalBuildHash = string.Empty;
             ResetReplicationCombatRuntimeState();
+            ResetReplicationEventRuntimeState(traderPartyResetContext);
             ResetReplicationSemanticAgentMotionPresentation();
             ResetReplicationSemanticAgentWorkPresentation();
+            ResetReplicationAnimalStateRuntime();
+            ClearReplicationBuildBatchRuntimeState();
             replicationNextHelloLogRealtime = 0f;
             replicationNextSnapshotValidationRealtime = 0f;
             replicationNextResourcePileStateSnapshotRealtime = 0f;
@@ -238,6 +261,7 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationNextAgentActionHeartbeatRealtime = 0f;
             replicationNextAgentCharacterStateSnapshotRealtime = 0f;
             replicationNextBuildingStateSnapshotRealtime = 0f;
+            replicationNextBuildingStateRepairSnapshotRealtime = 0f;
             replicationNextRegionOrderMarkerSnapshotRealtime = 0f;
             replicationNextGameTimeSnapshotRealtime = 0f;
             replicationLastRuntimeUpdateFrame = -1;
@@ -261,7 +285,9 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationWorldObjectDeltasSent = 0;
             replicationWorldObjectDeltasReceived = 0;
             replicationWorldObjectDeltasApplied = 0;
-            replicationWorldObjectDeltaSequence = 0;
+            // Keep the reliable-delta sequence process-monotonic. A delayed ACK from
+            // the socket used before a full resync must never collide with and remove
+            // a new world's pending delta after the transport restarts.
             replicationWorldObjectDeltaAcksSent = 0;
             replicationWorldObjectDeltaAcksReceived = 0;
             replicationWorldObjectDeltaRetriesSent = 0;
@@ -321,13 +347,19 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationLastAreaOrderSubType = string.Empty;
             replicationLastAreaOrderRealtime = 0f;
             replicationNextRegionSelectionLogRealtime = 0f;
-            replicationHostCommandIntentKeys.Clear();
+            replicationHostCommandIntentResults.Clear();
+            replicationHostCommandIntentResultOrder.Clear();
+            replicationHostProtectedBuildBatchManifestCount = 0;
+            ReplicationPendingCommandIntents.Clear();
             replicationPendingWorldObjectDeltas.Clear();
+            ReplicationPendingSupersedableWorldDeltaSequenceByKey.Clear();
             replicationClientAppliedWorldObjectDeltaSequences.Clear();
+            ReplicationClientAppliedWorldObjectDeltaSequenceOrder.Clear();
             ReplicationClientPriorityWorldObjectDeltaApplies.Clear();
             ReplicationClientPendingWorldObjectDeltaApplies.Clear();
             ReplicationClientCoalescableWorldObjectDeltaApplies.Clear();
             ReplicationClientQueuedWorldObjectDeltaSequences.Clear();
+            ReplicationClientAppliedAbsoluteStateSequenceHighWater.Clear();
             ReplicationAgentProgressOwnerByBar.Clear();
             ReplicationAgentProgressLastPermilleByKey.Clear();
             ReplicationAgentProgressLoggedOwnerKeys.Clear();
@@ -341,6 +373,23 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationLastResourcePileStateSnapshotSignature = 0UL;
             replicationLastBuildingStateSnapshotSignatureValid = false;
             replicationLastBuildingStateSnapshotSignature = 0UL;
+            replicationBuildingStateSnapshotCycleActive = false;
+            replicationBuildingStateSnapshotChangeDeferred = false;
+            replicationBuildingStateSnapshotDeferredUntilRealtime = 0f;
+            replicationBuildingStateSnapshotDeferredChangeCount = 0L;
+            replicationBuildingStateSnapshotLastCollectionMs = 0d;
+            replicationBuildingStateSnapshotLastQueueMs = 0d;
+            ResetReplicationBuildTransactionLedger();
+            ResetReplicationBuildingLifecycleV2();
+            replicationBuildingStateSnapshotPageOffset = 0;
+            replicationBuildingStateSnapshotPendingId = 0L;
+            replicationBuildingStateSnapshotPendingEndSequence = 0L;
+            replicationBuildingStateSnapshotPendingNextOffset = 0;
+            replicationBuildingStateSnapshotPendingCycleComplete = false;
+            replicationClientLatestBuildingStateSnapshotId = -1L;
+            replicationClientCompletedBuildingStateSnapshotId = -1L;
+            replicationClientLatestResourcePileStateSnapshotId = -1L;
+            replicationClientCompletedResourcePileStateSnapshotId = -1L;
             replicationDriftSignaturesMatched = 0;
             replicationDriftSignaturesMismatched = 0;
             replicationLastDriftSummary = string.Empty;
@@ -484,8 +533,18 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
+            var firstCompatibleHello = !replicationRemoteHelloReceived;
             replicationRemoteCompatibilityRefused = false;
             replicationRemoteHelloReceived = true;
+            if (firstCompatibleHello)
+            {
+                replicationNextAnimalAppearanceSnapshotRealtime = 0f;
+                replicationNextEventCheckpointRealtime = 0f;
+                replicationNextWeatherCheckpointRealtime = 0f;
+                replicationNextWeatherEnvironmentRealtime = 0f;
+                replicationLastWeatherScheduleSignature = string.Empty;
+                replicationLastWeatherEnvironmentSignature = string.Empty;
+            }
             replicationHellosReceived++;
             if (replicationHellosReceived == 1 || Time.realtimeSinceStartup >= replicationNextHelloLogRealtime)
             {
@@ -549,6 +608,35 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
+            var localHasBuildingCapability = TryReadReplicationBuildingCapability(
+                localBuildHash,
+                out var localBuildingCapability);
+            var remoteHasBuildingCapability = TryReadReplicationBuildingCapability(
+                hello.BuildHash,
+                out var remoteBuildingCapability);
+            if (!localHasBuildingCapability || !remoteHasBuildingCapability)
+            {
+                error = "building-capability-missing local="
+                    + (localHasBuildingCapability ? "present" : "missing")
+                    + " remote="
+                    + (remoteHasBuildingCapability ? "present" : "legacy");
+                return false;
+            }
+
+            var buildingCompatibility = BuildingReplicationCompatibilityPolicy.Evaluate(
+                localBuildingCapability,
+                remoteBuildingCapability);
+            if (!buildingCompatibility.IsCompatible)
+            {
+                error = "building-capability-incompatible reason="
+                    + buildingCompatibility.Disposition.ToString()
+                    + " local="
+                    + localBuildingCapability.ToWireToken()
+                    + " remote="
+                    + remoteBuildingCapability.ToWireToken();
+                return false;
+            }
+
             var localHasCombatCapabilities = TryReadReplicationCombatCapabilityFingerprint(localBuildHash, out var localCombatCapabilities);
             var remoteHasCombatCapabilities = TryReadReplicationCombatCapabilityFingerprint(hello.BuildHash, out var remoteCombatCapabilities);
             if (localHasCombatCapabilities
@@ -557,6 +645,58 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 error = "combat-capabilities-mismatch local=" + localCombatCapabilities + " remote=" + remoteCombatCapabilities;
                 return false;
+            }
+
+            var localHasEventCapabilities = TryReadReplicationEventCapabilityFingerprint(localBuildHash, out var localEventCapabilities);
+            var remoteHasEventCapabilities = TryReadReplicationEventCapabilityFingerprint(hello.BuildHash, out var remoteEventCapabilities);
+            if (localHasEventCapabilities
+                && remoteHasEventCapabilities
+                && !string.Equals(localEventCapabilities, remoteEventCapabilities, StringComparison.Ordinal))
+            {
+                error = "event-capabilities-mismatch local=" + localEventCapabilities + " remote=" + remoteEventCapabilities;
+                return false;
+            }
+
+            if ((replicationConfigEventReplication || replicationConfigWeatherReplication)
+                && !remoteHasEventCapabilities)
+            {
+                error = "event-capabilities-missing remote=<legacy>";
+                return false;
+            }
+
+            var localHasGameAssemblyIdentity = TryReadReplicationGameAssemblyIdentity(
+                localBuildHash,
+                out var localGameAssemblyIdentity);
+            var remoteHasGameAssemblyIdentity = TryReadReplicationGameAssemblyIdentity(
+                hello.BuildHash,
+                out var remoteGameAssemblyIdentity);
+            // FV payload compatibility is a configuration-level contract. Keep the
+            // hard MVID guard active even when a local hook/surface failure makes the
+            // effective trader lane fail closed; otherwise two equally degraded peers
+            // could accept a session and later deserialize an incompatible party after
+            // one side recovers or is restaged.
+            var traderSerializerCompatibilityRequired = replicationConfigEventTraderAuthority
+                || (remoteHasEventCapabilities
+                    && remoteEventCapabilities.Length > 2
+                    && remoteEventCapabilities[2] == '1');
+            var traderSerializerCompatibility = TraderSerializerCompatibilityPolicy.Evaluate(
+                traderSerializerCompatibilityRequired,
+                localHasGameAssemblyIdentity ? localGameAssemblyIdentity : string.Empty,
+                remoteHasGameAssemblyIdentity ? remoteGameAssemblyIdentity : string.Empty);
+            switch (traderSerializerCompatibility)
+            {
+                case TraderSerializerCompatibilityResult.LocalIdentityMissing:
+                    error = "trader-game-assembly-identity-missing local=<unavailable>";
+                    return false;
+                case TraderSerializerCompatibilityResult.RemoteIdentityMissing:
+                    error = "trader-game-assembly-identity-missing remote=<legacy>";
+                    return false;
+                case TraderSerializerCompatibilityResult.AssemblyMismatch:
+                    error = "trader-game-assembly-mismatch local="
+                        + localGameAssemblyIdentity
+                        + " remote="
+                        + remoteGameAssemblyIdentity;
+                    return false;
             }
 
             // Build-hash mismatch warns but does not refuse. A hard refusal here turns a
@@ -611,8 +751,14 @@ namespace GoingCooperative.Plugin.BepInEx
             return ComputeReplicationLocalBuildHash()
                 + "|agent="
                 + FormatReplicationAgentPresentationCapability()
+                + "|building="
+                + FormatReplicationBuildingCapability()
                 + "|combat="
-                + FormatReplicationCombatCapabilityFingerprint();
+                + FormatReplicationCombatCapabilityFingerprint()
+                + "|events="
+                + FormatReplicationEventCapabilityFingerprint()
+                + "|gameasm="
+                + GetReplicationGameAssemblyModuleVersionId();
         }
 
         private static string FormatReplicationAgentPresentationCapability()
@@ -620,6 +766,34 @@ namespace GoingCooperative.Plugin.BepInEx
             return (replicationConfigSemanticAgentPresentation ? "1" : "0")
                 + ":"
                 + ReplicationEntityMotionMetadata.WireVersion;
+        }
+
+        private static string FormatReplicationBuildingCapability()
+        {
+            return GetLocalReplicationBuildingCapability().ToWireToken();
+        }
+
+        private static bool TryReadReplicationBuildingCapability(
+            string buildHash,
+            out BuildingReplicationCapability capability)
+        {
+            capability = default;
+            if (!TryReadReplicationCapabilitySegment(buildHash, "building", out var value))
+            {
+                return false;
+            }
+
+            return BuildingReplicationCapability.TryParseWireToken(value, out capability);
+        }
+
+        private static BuildingReplicationCapability GetLocalReplicationBuildingCapability()
+        {
+            return new BuildingReplicationCapability(
+                replicationConfigBuildingReplicationV2
+                    ? BuildingReplicationMode.TransactionLifecycleV2
+                    : BuildingReplicationMode.LegacySnapshots,
+                BuildingReplicationCapability.CurrentTransactionSchemaVersion,
+                legacyRollbackSupported: true);
         }
 
         private static bool TryReadReplicationAgentPresentationCapability(
@@ -669,17 +843,115 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryReadReplicationCombatCapabilityFingerprint(string buildHash, out string fingerprint)
         {
-            fingerprint = string.Empty;
-            const string marker = "|combat=";
-            var markerIndex = buildHash.LastIndexOf(marker, StringComparison.Ordinal);
-            if (markerIndex < 0) return false;
-            fingerprint = buildHash.Substring(markerIndex + marker.Length);
+            if (!TryReadReplicationCapabilitySegment(buildHash, "combat", out fingerprint)) return false;
             if (fingerprint.Length != 10) return false;
             for (var i = 0; i < fingerprint.Length; i++)
             {
                 if (fingerprint[i] != '0' && fingerprint[i] != '1') return false;
             }
             return true;
+        }
+
+        private static string FormatReplicationEventCapabilityFingerprint()
+        {
+            return (replicationConfigEventReplication ? "1" : "0")
+                + (replicationConfigEventSchedulerAuthority ? "1" : "0")
+                + (replicationConfigEventTraderAuthority ? "1" : "0")
+                + (TraderEventAuthorityEnabled() ? "1" : "0")
+                + (replicationConfigEventLifecycleReplication ? "1" : "0")
+                + (replicationConfigEventDialogReplication ? "1" : "0")
+                + (replicationConfigEventChoiceCommands ? "1" : "0")
+                + (replicationConfigEventSpeedReplication ? "1" : "0")
+                + (replicationConfigEventWarningReplication ? "1" : "0")
+                + (replicationConfigEventNoticeReplication ? "1" : "0")
+                + (replicationConfigEventExternalAgentLifecycle ? "1" : "0")
+                + (replicationConfigEventEnvironmentMutationReplication ? "1" : "0")
+                + (replicationConfigPlayerTriggeredEventReplication ? "1" : "0")
+                + (replicationConfigWeatherReplication ? "1" : "0")
+                + (replicationConfigWeatherSchedulerAuthority ? "1" : "0")
+                + (replicationConfigWeatherTemperatureReplication ? "1" : "0")
+                + (string.Equals(replicationConfigWorldObjectDeltaMode, "apply", StringComparison.OrdinalIgnoreCase) ? "1" : "0")
+                + (IsReplicationCaptureModeSendEnabled(replicationConfigCommandCaptureMode) ? "1" : "0")
+                + ":6";
+        }
+
+        private static bool TryReadReplicationEventCapabilityFingerprint(string buildHash, out string fingerprint)
+        {
+            if (!TryReadReplicationCapabilitySegment(buildHash, "events", out fingerprint)) return false;
+            if (fingerprint.Length != 20 || fingerprint[18] != ':' || fingerprint[19] != '6') return false;
+            for (var i = 0; i < 18; i++)
+            {
+                if (fingerprint[i] != '0' && fingerprint[i] != '1') return false;
+            }
+            return true;
+        }
+
+        private static string GetReplicationGameAssemblyModuleVersionId()
+        {
+            if (!string.IsNullOrEmpty(replicationGameAssemblyModuleVersionId))
+                return replicationGameAssemblyModuleVersionId;
+            try
+            {
+                var gameType = Type.GetType(
+                    "NSMedieval.GameEventSystem.GameEventInstance, Assembly-CSharp",
+                    throwOnError: false);
+                var gameAssembly = gameType?.Assembly;
+                if (gameAssembly == null)
+                {
+                    var loadedAssemblies = AppDomain.CurrentDomain.GetAssemblies();
+                    for (var i = 0; i < loadedAssemblies.Length; i++)
+                    {
+                        if (!string.Equals(
+                                loadedAssemblies[i].GetName().Name,
+                                "Assembly-CSharp",
+                                StringComparison.Ordinal)) continue;
+                        gameAssembly = loadedAssemblies[i];
+                        break;
+                    }
+                }
+
+                var moduleVersionId = gameAssembly?.ManifestModule.ModuleVersionId ?? Guid.Empty;
+                if (moduleVersionId == Guid.Empty) return string.Empty;
+                replicationGameAssemblyModuleVersionId = moduleVersionId.ToString("N");
+                return replicationGameAssemblyModuleVersionId;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static bool TryReadReplicationGameAssemblyIdentity(string buildHash, out string identity)
+        {
+            identity = string.Empty;
+            if (!TryReadReplicationCapabilitySegment(buildHash, "gameasm", out var value)
+                || value.Length != 32)
+            {
+                return false;
+            }
+            for (var i = 0; i < value.Length; i++)
+            {
+                var character = value[i];
+                if ((character < '0' || character > '9')
+                    && (character < 'a' || character > 'f')) return false;
+            }
+            identity = value;
+            return true;
+        }
+
+        private static bool TryReadReplicationCapabilitySegment(string buildHash, string name, out string value)
+        {
+            value = string.Empty;
+            var marker = "|" + name + "=";
+            var markerIndex = buildHash.LastIndexOf(marker, StringComparison.Ordinal);
+            if (markerIndex < 0) return false;
+            var valueIndex = markerIndex + marker.Length;
+            if (valueIndex >= buildHash.Length) return false;
+            var endIndex = buildHash.IndexOf('|', valueIndex);
+            value = endIndex >= 0
+                ? buildHash.Substring(valueIndex, endIndex - valueIndex)
+                : buildHash.Substring(valueIndex);
+            return value.Length > 0;
         }
 
         private static string ComputeReplicationLocalBuildHash()
@@ -981,40 +1253,82 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
-            var commandKey = BuildReplicationCommandIntentKey(command);
-            if (!replicationHostCommandIntentKeys.Add(commandKey))
+            if (command.Kind == CommandKind.Build
+                && LockstepCommandPayloads.TryReadBuildBatchPayload(
+                    command.PayloadJson,
+                    out _,
+                    out _,
+                    out _,
+                    out _,
+                    out _)
+                && (!LockstepCommandPayloads.TryReadBuildBatchEpoch(command.PayloadJson, out var buildEpoch)
+                    || buildEpoch != GetReplicationBuildBatchEpoch()))
             {
+                var epochDetail = "building-batch-command-epoch-mismatch expected="
+                    + GetReplicationBuildBatchEpoch().ToString(CultureInfo.InvariantCulture)
+                    + " received="
+                    + buildEpoch.ToString(CultureInfo.InvariantCulture);
+                replicationLastIntentSummary = epochDetail + " " + FormatRuntimeCommandSummary(command);
+                SendReplicationCommandAck(command, accepted: false, duplicate: false, detail: epochDetail);
+                return;
+            }
+
+            var commandKey = BuildReplicationCommandIntentKey(command);
+            if (replicationHostCommandIntentResults.TryGetValue(commandKey, out var originalRecord))
+            {
+                var originalResult = originalRecord.Result;
                 replicationLastIntentSummary = "host-duplicate " + FormatRuntimeCommandSummary(command);
-                SendReplicationCommandAck(command, accepted: true, duplicate: true, detail: "duplicate");
+                SendReplicationCommandAck(command, originalResult.Invoked, duplicate: true, detail: originalResult.Detail);
+                ResendReplicationBuildBatchResult(command, originalRecord.BuildBatchCommitManifest);
                 LogReplicationInfo("Going Cooperative replication intent duplicate ignored "
                     + FormatRuntimeCommandSummary(command));
                 return;
             }
 
-            BeginReplicationRegionOrderStateCaptureSuppression();
             RuntimeCommandResult result;
-            try
+            if (TryHandleReplicationBuildingProgressRequestV2(command, out var buildingProgressResult))
             {
-                result = ApplyRuntimeCommand(this, command);
+                result = buildingProgressResult;
             }
-            catch (Exception ex)
+            else if (IsReplicationBuildBatchCommand(command)
+                && replicationHostProtectedBuildBatchManifestCount
+                    >= ReplicationBuildingDurableBackpressureLimit)
             {
-                // An apply exception must not eat the ack - the client would retry into
-                // the duplicate gate and see the command silently vanish. Ack invoked=no
-                // with the error instead.
+                // Do not execute more authoritative construction while the host can no
+                // longer deliver prior commit proofs. The client ACK path escalates
+                // directly to full-save recovery, so no additional heavy manifest is
+                // retained for this rejected command.
                 result = new RuntimeCommandResult(
                     false,
-                    "apply-exception " + ex.GetType().Name + ":" + ex.Message);
-                LogReplicationWarning("Going Cooperative replication intent apply threw error="
-                    + ex.GetType().Name
-                    + ":"
-                    + ex.Message
-                    + " "
-                    + FormatRuntimeCommandSummary(command));
+                    "building-v2-backpressure-recovery-required protected="
+                        + replicationHostProtectedBuildBatchManifestCount.ToString(CultureInfo.InvariantCulture));
             }
-            finally
+            else
             {
-                EndReplicationRegionOrderStateCaptureSuppression();
+                BeginReplicationRegionOrderStateCaptureSuppression();
+                try
+                {
+                    result = ApplyRuntimeCommand(this, command);
+                }
+                catch (Exception ex)
+                {
+                    // An apply exception must not eat the ack - the client would retry into
+                    // the duplicate gate and see the command silently vanish. Ack invoked=no
+                    // with the error instead.
+                    result = new RuntimeCommandResult(
+                        false,
+                        "apply-exception " + ex.GetType().Name + ":" + ex.Message);
+                    LogReplicationWarning("Going Cooperative replication intent apply threw error="
+                        + ex.GetType().Name
+                        + ":"
+                        + ex.Message
+                        + " "
+                        + FormatRuntimeCommandSummary(command));
+                }
+                finally
+                {
+                    EndReplicationRegionOrderStateCaptureSuppression();
+                }
             }
 
             if (result.Invoked)
@@ -1022,9 +1336,11 @@ namespace GoingCooperative.Plugin.BepInEx
                 replicationIntentsApplied++;
             }
 
+            var buildBatchCommitManifest = TryCreateReplicationBuildBatchCommitManifest(command, result);
+            RememberReplicationHostCommandResult(commandKey, result, buildBatchCommitManifest);
             SendReplicationCommandAck(command, result.Invoked, duplicate: false, detail: result.Detail);
             SendReplicationRegionOrderStateIfSupported(command, result);
-            SendReplicationBuildBlueprintResultDeltaIfSupported(command, result);
+            SendReplicationBuildBlueprintResultDeltaIfSupported(command, result, buildBatchCommitManifest);
             SendReplicationManagementStateIfSupported(command, result);
             SendReplicationCombatStateIfSupported(command, result);
 
@@ -1076,6 +1392,38 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             replicationCommandAcksReceived++;
+            var pendingCommandKey = ack.PlayerId + ":" + ack.Sequence.ToString(CultureInfo.InvariantCulture);
+            ReplicationPendingCommandIntents.TryGetValue(pendingCommandKey, out var pendingCommand);
+            var pendingBuildBatch = pendingCommand != null && IsReplicationBuildBatchCommand(pendingCommand.Command);
+            if (pendingBuildBatch)
+            {
+                // The command ACK is transaction-level receipt state; the durable result
+                // manifest owns per-item canonical truth for both accepted and rejected
+                // batches. Do not discard provisional views on a negative ACK before the
+                // all-zero/partial/recovery manifest arrives.
+                pendingCommand!.MarkHostResponded(ack.Accepted, Time.realtimeSinceStartup);
+                if (ack.Detail.IndexOf(
+                    "building-v2-backpressure-recovery-required",
+                    StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    ScheduleReplicationBuildBatchRecovery(
+                        "host-building-backpressure command="
+                            + ack.Sequence.ToString(CultureInfo.InvariantCulture));
+                }
+            }
+            else
+            {
+                ReplicationPendingCommandIntents.Remove(pendingCommandKey);
+            }
+            var pendingEventChoice = replicationPendingEventChoice;
+            if (pendingEventChoice != null
+                && string.Equals(ack.PlayerId, pendingEventChoice.Command.PlayerId, StringComparison.Ordinal)
+                && ack.Sequence == pendingEventChoice.Command.Sequence
+                && !ack.Accepted)
+            {
+                replicationPendingEventChoice = null;
+                replicationLastEventSummary = "choice-rejected detail=" + ack.Detail;
+            }
             replicationLastIntentSummary = "ack accepted="
                 + (ack.Accepted ? "yes" : "no")
                 + " duplicate="
@@ -1101,6 +1449,185 @@ namespace GoingCooperative.Plugin.BepInEx
         private static string BuildReplicationCommandIntentKey(LockstepCommand command)
         {
             return command.PlayerId + ":" + command.Sequence.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static void RememberReplicationHostCommandResult(
+            string commandKey,
+            RuntimeCommandResult result,
+            ReplicationBuildBatchCommitManifest? buildBatchCommitManifest)
+        {
+            var record = new ReplicationHostCommandResultRecord(result, buildBatchCommitManifest);
+            if (replicationHostCommandIntentResults.TryGetValue(commandKey, out var previous))
+            {
+                if (previous.IsEvictionProtected)
+                {
+                    replicationHostProtectedBuildBatchManifestCount = Math.Max(
+                        0,
+                        replicationHostProtectedBuildBatchManifestCount - 1);
+                }
+
+                replicationHostCommandIntentResults[commandKey] = record;
+                if (record.IsEvictionProtected)
+                {
+                    replicationHostProtectedBuildBatchManifestCount++;
+                }
+
+                RefreshReplicationHostCommandResultRetentionOrder(commandKey);
+                TrimReplicationHostCommandResultCache();
+                return;
+            }
+
+            replicationHostCommandIntentResults.Add(commandKey, record);
+            replicationHostCommandIntentResultOrder.Enqueue(commandKey);
+            if (record.IsEvictionProtected)
+            {
+                replicationHostProtectedBuildBatchManifestCount++;
+            }
+
+            TrimReplicationHostCommandResultCache();
+        }
+
+        private static void TrimReplicationHostCommandResultCache()
+        {
+            // An unacknowledged BuildBatch manifest is the only durable proof of the
+            // host's exact per-item commit outcome. It is not part of the generic
+            // tombstone budget and cannot be evicted while the client may still ask for
+            // that result. Ordinary command results retain the existing bounded policy.
+            var unprotectedCount = replicationHostCommandIntentResults.Count
+                - replicationHostProtectedBuildBatchManifestCount;
+            var scanBudget = replicationHostCommandIntentResultOrder.Count;
+            while (unprotectedCount > ReplicationHostCommandResultRetention
+                && replicationHostCommandIntentResultOrder.Count > 0
+                && scanBudget-- > 0)
+            {
+                var candidateKey = replicationHostCommandIntentResultOrder.Dequeue();
+                if (!replicationHostCommandIntentResults.TryGetValue(candidateKey, out var candidate))
+                {
+                    continue;
+                }
+
+                if (candidate.IsEvictionProtected)
+                {
+                    replicationHostCommandIntentResultOrder.Enqueue(candidateKey);
+                    continue;
+                }
+
+                replicationHostCommandIntentResults.Remove(candidateKey);
+                unprotectedCount--;
+            }
+        }
+
+        private static void RefreshReplicationHostCommandResultRetentionOrder(string commandKey)
+        {
+            var count = replicationHostCommandIntentResultOrder.Count;
+            for (var i = 0; i < count; i++)
+            {
+                var existingKey = replicationHostCommandIntentResultOrder.Dequeue();
+                if (!string.Equals(existingKey, commandKey, StringComparison.Ordinal))
+                {
+                    replicationHostCommandIntentResultOrder.Enqueue(existingKey);
+                }
+            }
+
+            replicationHostCommandIntentResultOrder.Enqueue(commandKey);
+        }
+
+        private static bool TryReleaseReplicationHostBuildBatchCommitManifest(
+            ReplicationWorldObjectDelta acknowledgedDelta,
+            out string detail)
+        {
+            detail = string.Empty;
+            if (!string.Equals(
+                    acknowledgedDelta.DeltaKind,
+                    ReplicationBuildingBlueprintBatchResultDeltaKind,
+                    StringComparison.Ordinal)
+                || !TryReadReplicationWorldObjectDetailToken(
+                    acknowledgedDelta.Detail,
+                    "player",
+                    out var playerId)
+                || !TryReadReplicationWorldObjectDetailLong(
+                    acknowledgedDelta.Detail,
+                    "commandSequence",
+                    out var commandSequence)
+                || commandSequence <= 0L
+                || acknowledgedDelta.UniqueId != commandSequence)
+            {
+                detail = "build-batch-manifest-release-delta-mismatch";
+                return false;
+            }
+
+            var commandKey = playerId + ":" + commandSequence.ToString(CultureInfo.InvariantCulture);
+            if (!replicationHostCommandIntentResults.TryGetValue(commandKey, out var record))
+            {
+                // Player identifiers are normalized as detail tokens on the wire. Fall
+                // back to the exact immutable delta match so whitespace normalization
+                // cannot prevent release of an otherwise acknowledged manifest.
+                foreach (var pair in replicationHostCommandIntentResults)
+                {
+                    if (pair.Value.BuildBatchCommitManifest?.MatchesResultDelta(acknowledgedDelta) == true)
+                    {
+                        commandKey = pair.Key;
+                        record = pair.Value;
+                        break;
+                    }
+                }
+
+                if (record == null)
+                {
+                    detail = "build-batch-manifest-release-tombstone-missing key=" + commandKey;
+                    return false;
+                }
+            }
+
+            var manifest = record.BuildBatchCommitManifest;
+            if (manifest == null)
+            {
+                detail = "build-batch-manifest-already-released key=" + commandKey;
+                return false;
+            }
+
+            if (!manifest.MatchesResultDelta(acknowledgedDelta))
+            {
+                detail = "build-batch-manifest-release-exact-delta-mismatch key=" + commandKey;
+                return false;
+            }
+
+            record.ReleaseBuildBatchCommitManifest();
+            replicationHostProtectedBuildBatchManifestCount = Math.Max(
+                0,
+                replicationHostProtectedBuildBatchManifestCount - 1);
+            // A manifest may have remained protected beyond the ordinary cache window.
+            // Give its lightweight tombstone a fresh normal-retention position so a late
+            // duplicate cannot re-execute immediately after the positive result ACK.
+            RefreshReplicationHostCommandResultRetentionOrder(commandKey);
+            TrimReplicationHostCommandResultCache();
+            detail = "build-batch-manifest-released key="
+                + commandKey
+                + " protectedRemaining="
+                + replicationHostProtectedBuildBatchManifestCount.ToString(CultureInfo.InvariantCulture);
+            return true;
+        }
+
+        private sealed class ReplicationHostCommandResultRecord
+        {
+            public ReplicationHostCommandResultRecord(
+                RuntimeCommandResult result,
+                ReplicationBuildBatchCommitManifest? buildBatchCommitManifest)
+            {
+                Result = result;
+                BuildBatchCommitManifest = buildBatchCommitManifest;
+            }
+
+            public RuntimeCommandResult Result { get; }
+
+            public ReplicationBuildBatchCommitManifest? BuildBatchCommitManifest { get; private set; }
+
+            public bool IsEvictionProtected => BuildBatchCommitManifest != null;
+
+            public void ReleaseBuildBatchCommitManifest()
+            {
+                BuildBatchCommitManifest = null;
+            }
         }
 
         private void SendReplicationRegionOrderStateIfSupported(LockstepCommand command, RuntimeCommandResult result)
@@ -1732,6 +2259,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 + FormatReplicationSemanticAgentMotionStatus()
                 + " "
                 + FormatReplicationSemanticWorkStatus()
+                + " "
+                + FormatReplicationEventStatus()
+                + " "
+                + FormatReplicationWeatherStatus()
                 + " lastResync="
                 + (string.IsNullOrEmpty(replicationLastResyncSummary) ? "<none>" : replicationLastResyncSummary));
         }

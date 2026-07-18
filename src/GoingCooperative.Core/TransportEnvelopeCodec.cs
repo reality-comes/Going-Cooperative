@@ -36,7 +36,9 @@ namespace GoingCooperative.Core
                 return false;
             }
 
-            var parts = line.Split('\t');
+            // Force the legacy char[] overload used by the game's Mono runtime.
+            // Newer compilers otherwise bind Split(char), which is absent there.
+            var parts = line.Split(new[] { '\t' }, StringSplitOptions.None);
             if (parts.Length != 5)
             {
                 error = "expected 5 tab-delimited fields";

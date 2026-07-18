@@ -85,6 +85,27 @@ namespace GoingCooperative.Plugin.BepInEx
 
         bool IRuntimeCommandActions.ApplyCustom(string payloadJson, out string detail)
         {
+            if (LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(
+                payloadJson,
+                out var eventEpoch,
+                out var eventId,
+                out var eventRevision,
+                out var dialogId,
+                out var dialogIndex,
+                out var optionIndex,
+                out var requestId))
+            {
+                return TryApplyReplicationEventChoice(
+                    eventEpoch,
+                    eventId,
+                    eventRevision,
+                    dialogId,
+                    dialogIndex,
+                    optionIndex,
+                    requestId,
+                    out detail);
+            }
+
             if (LockstepCommandPayloads.TryReadDraftStatePayload(payloadJson, out var draftEntityId, out var drafted, out var combatMode))
             {
                 return TryApplyReplicationCombatDraftState(draftEntityId, drafted, combatMode, out detail);

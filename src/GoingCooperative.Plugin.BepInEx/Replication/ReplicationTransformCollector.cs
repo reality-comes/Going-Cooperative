@@ -42,6 +42,17 @@ namespace GoingCooperative.Plugin.BepInEx
                     positionSample);
                 CollectReplicationViewTransforms(
                     views,
+                    "npc",
+                    maxEntities,
+                    seen,
+                    seenEntityIds,
+                    entities,
+                    ref stableCount,
+                    ref fallbackCount,
+                    fallbackSample,
+                    positionSample);
+                CollectReplicationViewTransforms(
+                    views,
                     "animal",
                     maxEntities,
                     seen,
@@ -279,6 +290,15 @@ namespace GoingCooperative.Plugin.BepInEx
                     return true;
                 }
 
+                if (string.Equals(fullName, "NSMedieval.View.NPCView", StringComparison.Ordinal)
+                    && TryGetReplicationTraderPartyViewOwner(view, out _))
+                {
+                    // Ordinary neutral NPCs remain outside the two-player snapshot budget.
+                    // Only host-authored external-event pawns receive this lane.
+                    kind = "npc";
+                    return true;
+                }
+
                 type = type.BaseType;
             }
 
@@ -408,7 +428,8 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool IsReplicationStableEntityId(string entityId)
         {
-            return entityId.StartsWith("goap:", StringComparison.Ordinal)
+            return entityId.StartsWith("event-agent:", StringComparison.Ordinal)
+                || entityId.StartsWith("goap:", StringComparison.Ordinal)
                 || entityId.StartsWith("data:", StringComparison.Ordinal)
                 || entityId.StartsWith("uid:", StringComparison.Ordinal);
         }
@@ -461,6 +482,11 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
+            if (TryGetReplicationTraderPartyNetworkId(owner, out entityId))
+            {
+                return true;
+            }
+
             if (TryReadSimpleReplicationIdentity(owner, out entityId))
             {
                 return true;
@@ -477,6 +503,30 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             entityId = string.Empty;
+            return false;
+        }
+
+        private static bool TryGetReplicationTraderPartyViewOwner(object view, out object? owner)
+        {
+            owner = null;
+            if (TryInvokeReplicationObjectMethod(view, "GetAgentOwner", out var directOwner)
+                && directOwner != null
+                && TryGetReplicationTraderPartyNetworkId(directOwner, out _))
+            {
+                owner = directOwner;
+                return true;
+            }
+
+            if (TryInvokeReplicationObjectMethod(view, "GetAgent", out var agent)
+                && agent != null
+                && TryInvokeReplicationObjectMethod(agent, "get_AgentOwner", out var nestedOwner)
+                && nestedOwner != null
+                && TryGetReplicationTraderPartyNetworkId(nestedOwner, out _))
+            {
+                owner = nestedOwner;
+                return true;
+            }
+
             return false;
         }
 

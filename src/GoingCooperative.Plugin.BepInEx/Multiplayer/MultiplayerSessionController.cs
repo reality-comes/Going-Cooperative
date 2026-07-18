@@ -51,7 +51,7 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void ApplyMultiplayerSessionOptions(bool hostMode, string host, int port)
         {
-            StopReplicationRuntime();
+            StopReplicationRuntime(ReplicationTraderPartyResetContext.ScopeChangedSameWorld);
             replicationConfigEnabled = true;
             replicationConfigHostMode = hostMode;
             replicationConfigHost = host;
@@ -70,8 +70,9 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void StopMultiplayerSession()
         {
+            StopMultiplayerSteamSession();
             multiplayerSaveTransfer.Stop();
-            StopReplicationRuntime();
+            StopReplicationRuntime(ReplicationTraderPartyResetContext.StopInPlace);
             LogReplicationInfo("Going Cooperative multiplayer session stopped from menu.");
         }
 

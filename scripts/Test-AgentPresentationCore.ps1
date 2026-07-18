@@ -15,6 +15,7 @@ $output = Join-Path $outputDirectory "AgentPresentationPolicyTests.exe"
 $sources = @(
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\Replication\ReplicationAgentPresentationContracts.cs"),
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\AgentPresentationOrderingPolicy.cs"),
+    (Join-Path $repositoryRoot "src\GoingCooperative.Core\AgentWorkPresentationPolicy.cs"),
     (Join-Path $repositoryRoot "tests\AgentPresentationPolicyTests.cs")
 )
 
@@ -120,10 +121,50 @@ $workSource = Get-Content -LiteralPath (Join-Path $repositoryRoot "src\GoingCoop
 if (-not $workSource.Contains("semanticWorkPresentation: true")) {
     throw "Semantic work animation policy failed: semantic Start must select the isolated direct-view adapter."
 }
+$semanticWorkGateRequirements = @(
+    @{ Text = "replicationConfigSemanticAgentPresentation"; Name = "semantic work remains feature-gated" },
+    @{ Text = "AgentWorkPresentationPolicy.TryResolve(goalId, actionId"; Name = "runtime work claims use the tested semantic mapping policy" },
+    @{ Text = "ReplicationSemanticWorkAdvisoryDurationSeconds"; Name = "open-ended repair work remains anchored instead of falling back" },
+    @{ Text = 'source = "anchored-advisory"'; Name = "advisory duration fallback is observable" },
+    @{ Text = "replicationConfigSemanticWorkCycleDriver"; Name = "the cycle driver has an independent rollback gate" },
+    @{ Text = "MaintainReplicationSemanticWorkTrigger"; Name = "the narrow client trigger-maintenance controller is present" },
+    @{ Text = "UsesClientTriggerMaintenance"; Name = "trigger maintenance is selected through the tested core policy" },
+    @{ Text = "UsesHostCyclePulse"; Name = "Dig cycle behavior is selected through the tested core policy" },
+    @{ Text = "ReplicationSemanticWorkDigLeaseSeconds"; Name = "Dig has a bounded host-owned presentation lease" },
+    @{ Text = "SendReplicationSemanticWorkCyclePulse"; Name = "Dig lease states are sampled and emitted by the host" },
+    @{ Text = "TryCaptureReplicationSemanticWorkControllerAnimation"; Name = "observed low-level Dig transitions can advance the next lease sample" },
+    @{ Text = 'phase=Pulse'; Name = "Dig cycle pulses have an explicit semantic phase" },
+    @{ Text = 'InvokeReplicationSemanticWorkMaintainedTrigger(view, "ForceQuit")'; Name = "maintenance uses vanilla interrupt-mode ForceQuit sequencing" }
+)
+foreach ($requirement in $semanticWorkGateRequirements) {
+    if (-not $workSource.Contains($requirement.Text)) {
+        throw "Semantic work migration policy failed: $($requirement.Name)."
+    }
+}
+if ($workSource -notmatch '(?s)TryCaptureReplicationSemanticWorkAnimation\(.*?if \(!CanUseReplicationSemanticHostPresentation\(\)') {
+    throw "Semantic work migration policy failed: animation capture must remain behind semantic host capability."
+}
+if ($workSource -notmatch '(?s)ProcessReplicationSemanticAgentWorkPresentation\(.*?IsReplicationSemanticWorkCyclePulseEnabled\(state\.WorkKind\).*?now >= state\.NextCyclePulseRealtime.*?SendReplicationSemanticWorkCyclePulse') {
+    throw "Semantic work migration policy failed: active Dig must periodically renew its authoritative animation lease."
+}
+if ($workSource -notmatch '(?s)TryRecordReplicationSemanticWorkPhase\(.*?if \(!replicationConfigSemanticAgentPresentation\)') {
+    throw "Semantic work migration policy failed: lifecycle capture must remain behind semanticAgentPresentation."
+}
+if ($workSource -notmatch '(?s)TryApplyReplicationSemanticWorkDelta\(.*?if \(!replicationConfigSemanticAgentPresentation') {
+    throw "Semantic work migration policy failed: client playback must remain behind semanticAgentPresentation."
+}
 $authoritativeWorkVisualRequirements = @(
     @{ Text = "ReplicationSemanticWorkInitialVisualSampleSeconds"; Name = "work visuals are sampled after the vanilla transition frame" },
     @{ Text = '" animatorStateB64=" + EncodeReplicationDetailBase64(state.AnimatorStateDetail)'; Name = "work anchors carry authoritative animator state" },
     @{ Text = "ApplyReplicationAnimatorStateDetail(view, animatorStateDetail)"; Name = "clients apply authoritative work animator state" },
+    @{ Text = "ApplyReplicationAnimatorStateDetailIfDiverged"; Name = "periodic anchors use drift-only layer correction" },
+    @{ Text = "semanticWorkVisualCorrectionsApplied="; Name = "drift corrections are independently observable" },
+    @{ Text = "semanticWorkLocalCorrectionsApplied="; Name = "local early-exit repairs are independently observable" },
+    @{ Text = "semanticWorkTriggersRearmed="; Name = "maintained animation triggers are independently observable" },
+    @{ Text = "semanticWorkTriggerFallbacks="; Name = "fallback trigger timing is independently observable" },
+    @{ Text = "semanticWorkForceQuits="; Name = "interrupt-mode ForceQuit transitions are independently observable" },
+    @{ Text = "semanticWorkCyclePulsesSent="; Name = "authoritative Dig pulses sent are observable" },
+    @{ Text = "semanticWorkCyclePulsesApplied="; Name = "authoritative Dig pulses applied are observable" },
     @{ Text = "semanticWorkVisualAnchorsApplied="; Name = "authoritative visual anchors are observable in telemetry" }
 )
 foreach ($requirement in $authoritativeWorkVisualRequirements) {
@@ -140,8 +181,21 @@ $workPump = $workSource.Substring($workPumpStart, $workPumpEnd - $workPumpStart)
 if ($workPump.Contains('SetInstancePropertyIfPresent(view, view.GetType(), "TriggeredAnimationRunning", true);')) {
     throw "Semantic work animation policy failed: the hold pump must not restart vanilla animation-ended callbacks."
 }
-if (-not $workPump.Contains("ApplyReplicationPuppetActionAnimatorParameters(view, state.AnimationToken);")) {
-    throw "Semantic work animation policy failed: the hold pump must retain action parameters without retriggering."
+if ($workPump.Contains("ApplyReplicationPuppetActionAnimatorParameters(view, state.AnimationToken);")) {
+    throw "Semantic work animation policy failed: the hold pump must not overwrite authoritative work parameters."
+}
+if (-not $workPump.Contains("state.AnimatorStateDetail") -or
+    -not $workPump.Contains("ApplyReplicationAnimatorStateDetailIfDiverged")) {
+    throw "Semantic work animation policy failed: the client hold pump must repair early animation-state exits locally."
+}
+$triggerMaintenanceStart = $workSource.IndexOf("private static void MaintainReplicationSemanticWorkTrigger", [System.StringComparison]::Ordinal)
+$triggerMaintenanceEnd = $workSource.IndexOf("private static void ProcessReplicationSemanticAgentWorkPresentation", $triggerMaintenanceStart, [System.StringComparison]::Ordinal)
+if ($triggerMaintenanceStart -lt 0 -or $triggerMaintenanceEnd -le $triggerMaintenanceStart) {
+    throw "Semantic work animation policy failed: could not inspect trigger maintenance."
+}
+$triggerMaintenance = $workSource.Substring($triggerMaintenanceStart, $triggerMaintenanceEnd - $triggerMaintenanceStart)
+if ($triggerMaintenance.Contains("animator.Play")) {
+    throw "Semantic work animation policy failed: trigger maintenance must not replay animator states directly."
 }
 
 $legacyTriggerStart = $worldDeltaSource.IndexOf("private static string InvokeReplicationAgentViewAnimationTrigger", [System.StringComparison]::Ordinal)
@@ -160,6 +214,11 @@ if ($semanticTriggerBlock.IndexOf('FindReplicationInstanceMethod(view.GetType(),
     $semanticTriggerBlock.IndexOf("TryInvokeReplicationNativeAnimationController", [System.StringComparison]::Ordinal)) {
     throw "Semantic work animation policy failed: semantic work must deliver to the resolved view before native fallback."
 }
+if ($semanticTriggerBlock.Contains("ApplyReplicationPuppetActionAnimatorParameters")) {
+    throw "Semantic work animation policy failed: semantic Start must preserve authoritative work parameters."
+}
+& powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "Test-SemanticWorkGameSurfaces.ps1")
+if ($LASTEXITCODE -ne 0) { throw "Semantic work installed-game surface tests failed." }
 Write-Host "PASS SemanticMotionAccessorPolicy"
 Write-Host "PASS SemanticWorkTargetIdentityPolicy"
 Write-Host "PASS SemanticInterpolationPolicy"

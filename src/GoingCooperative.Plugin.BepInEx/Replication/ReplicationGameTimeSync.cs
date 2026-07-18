@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using GoingCooperative.Core;
 using GoingCooperative.Core.Replication;
 using HarmonyLib;
 using UnityEngine;
@@ -9,8 +10,7 @@ namespace GoingCooperative.Plugin.BepInEx
     public sealed partial class GoingCooperativePlugin
     {
         private const float ReplicationGameTimeSnapshotSeconds = 1f;
-        private const int ReplicationGameTimeMinuteSnapThreshold = 1;
-        private const float ReplicationGameTimeUnitySnapThreshold = 2f;
+        private const float ReplicationGameTimeMinuteFractionSnapThreshold = 0.25f;
         private static object? replicationWorldTimeManagerInstance;
 
         private void SendHostReplicationGameTimeSnapshotIfDue()
@@ -35,6 +35,12 @@ namespace GoingCooperative.Plugin.BepInEx
             if (!TryReadReplicationGameTimeState(out var minutesTotal, out var minuteFract, out var unityTime, out var detail))
             {
                 replicationLastGameTimeSummary = "collect-failed " + detail;
+                return;
+            }
+
+            if (!ReplicationOrderingPolicy.IsValidGameTime(minutesTotal, minuteFract, unityTime))
+            {
+                replicationLastGameTimeSummary = "collect-invalid";
                 return;
             }
 
@@ -63,18 +69,14 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryApplyReplicationGameTimeSnapshot(ReplicationWorldObjectDelta delta, out string detail)
         {
-            if (!TryReadReplicationWorldObjectDetailInt(delta.Detail, "minutes", out var hostMinutes))
+            if (!TryReadReplicationWorldObjectDetailInt(delta.Detail, "minutes", out var hostMinutes)
+                || !TryReadReplicationWorldObjectDetailFloat(delta.Detail, "minuteFract", out var hostMinuteFract)
+                || !TryReadReplicationWorldObjectDetailFloat(delta.Detail, "unityTime", out var hostUnityTime)
+                || !ReplicationOrderingPolicy.IsValidGameTime(hostMinutes, hostMinuteFract, hostUnityTime))
             {
-                detail = "game-time-minutes-missing";
+                detail = "game-time-snapshot-malformed";
                 return false;
             }
-
-            var hostMinuteFract = TryReadReplicationWorldObjectDetailFloat(delta.Detail, "minuteFract", out var parsedMinuteFract)
-                ? parsedMinuteFract
-                : 0f;
-            var hostUnityTime = TryReadReplicationWorldObjectDetailFloat(delta.Detail, "unityTime", out var parsedUnityTime)
-                ? parsedUnityTime
-                : 0f;
 
             if (!TryReadReplicationGameTimeState(out var localMinutes, out var localMinuteFract, out var localUnityTime, out var readDetail))
             {
@@ -82,10 +84,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
-            var minuteDrift = hostMinutes - localMinutes;
+            var minuteDrift = (hostMinutes + hostMinuteFract) - (localMinutes + localMinuteFract);
             var unityDrift = hostUnityTime - localUnityTime;
-            if (Math.Abs(minuteDrift) < ReplicationGameTimeMinuteSnapThreshold
-                && Math.Abs(unityDrift) < ReplicationGameTimeUnitySnapThreshold)
+            if (hostMinutes == localMinutes
+                && Math.Abs(minuteDrift) < ReplicationGameTimeMinuteFractionSnapThreshold)
             {
                 detail = "game-time-in-sync hostMinutes="
                     + hostMinutes.ToString(CultureInfo.InvariantCulture)
@@ -97,7 +99,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 return true;
             }
 
-            if (!TryWriteReplicationGameTimeState(hostMinutes, hostMinuteFract, hostUnityTime, out var writeDetail))
+            if (!TryWriteReplicationGameTimeState(hostMinutes, hostMinuteFract, out var writeDetail))
             {
                 detail = "game-time-apply-failed driftMinutes="
                     + minuteDrift.ToString(CultureInfo.InvariantCulture)
@@ -155,8 +157,14 @@ namespace GoingCooperative.Plugin.BepInEx
             return true;
         }
 
-        private static bool TryWriteReplicationGameTimeState(int minutesTotal, float minuteFract, float unityTime, out string detail)
+        private static bool TryWriteReplicationGameTimeState(int minutesTotal, float minuteFract, out string detail)
         {
+            if (!ReplicationOrderingPolicy.IsValidGameTime(minutesTotal, minuteFract, 0f))
+            {
+                detail = "game-time-write-values-invalid";
+                return false;
+            }
+
             if (!TryGetReplicationWorldTimeManager(out var manager, out detail) || manager == null)
             {
                 return false;
@@ -169,27 +177,79 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
-            var setMinutes = TryInvokeReplicationObjectMethod(
+            var normalizedMinutes = Convert.ToUInt32(minutesTotal, CultureInfo.InvariantCulture);
+            var normalizedFraction = minuteFract;
+            var setMinutes = TryInvokeReplicationVoidMethod(
                 worldDate,
                 "SetMinutesTotal",
-                new object[] { Convert.ToUInt32(Math.Max(0, minutesTotal), CultureInfo.InvariantCulture) },
-                out _);
-            var setFract = TryInvokeReplicationObjectMethod(
+                new[] { typeof(uint) },
+                new object[] { normalizedMinutes });
+            var setFract = TryInvokeReplicationVoidMethod(
                 worldDate,
                 "SetMinuteFractionalPart",
-                new object[] { Math.Max(0f, Math.Min(0.999f, minuteFract)) },
-                out _);
-            var setUnity = TrySetInstanceMemberValue(manager, "UnityTime", unityTime)
-                || TrySetInstanceMemberValue(manager, "unityTime", unityTime)
-                || TrySetReplicationStaticFloatMember(manager.GetType(), "UnityTime", "unityTime", unityTime);
+                new[] { typeof(float) },
+                new object[] { normalizedFraction });
+            var timerCorrectorField = GetCachedInstanceField(manager.GetType(), "timerCorrector");
+            var setTimerCorrector = false;
+            if (timerCorrectorField != null)
+            {
+                try
+                {
+                    timerCorrectorField.SetValue(manager, normalizedFraction);
+                    setTimerCorrector = true;
+                }
+                catch
+                {
+                }
+            }
+
+            var verified = TryReadReplicationGameTimeState(
+                    out var verifiedMinutes,
+                    out var verifiedFraction,
+                    out _,
+                    out var verifyDetail)
+                && verifiedMinutes == minutesTotal
+                && Math.Abs(verifiedFraction - normalizedFraction) <= 0.01f;
 
             detail = "setMinutes="
                 + (setMinutes ? "yes" : "no")
                 + " setMinuteFract="
                 + (setFract ? "yes" : "no")
-                + " setUnityTime="
-                + (setUnity ? "yes" : "no");
-            return setMinutes && setUnity;
+                + " setTimerCorrector="
+                + (setTimerCorrector ? "yes" : "no")
+                + " verified="
+                + (verified ? "yes" : "no")
+                + " verifyDetail="
+                + verifyDetail.Replace(" ", "_");
+            return setMinutes && setFract && setTimerCorrector && verified;
+        }
+
+        private static bool TryInvokeReplicationVoidMethod(
+            object target,
+            string methodName,
+            Type[] parameterTypes,
+            object[] arguments)
+        {
+            try
+            {
+                var method = target.GetType().GetMethod(
+                    methodName,
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic,
+                    null,
+                    parameterTypes,
+                    null);
+                if (method == null || method.ReturnType != typeof(void))
+                {
+                    return false;
+                }
+
+                method.Invoke(target, arguments);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static bool TryGetReplicationWorldTimeManager(out object? manager, out string detail)

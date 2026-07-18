@@ -42,9 +42,9 @@ internal static class ReplicationMotionCodecTests
             "host",
             new ReplicationTransformSnapshot(5, 12.5f, new[] { entity }));
         Equal(
-            "GCOOP-REPL-1|5|12.5|1|dWlkOjE=,d29ya2Vy,1,2,3,0,0,0,1",
+            ReplicationPayloadCodec.ProtocolVersion + "|5|12.5|1|dWlkOjE=,d29ya2Vy,1,2,3,0,0,0,1",
             envelope.Payload,
-            "legacy transform payload remains byte exact");
+            "legacy transform layout remains byte exact");
         True(ReplicationPayloadCodec.TryReadTransformSnapshot(envelope, out var decoded, out _), "legacy decodes");
         True(decoded != null && decoded.Entities.Count == 1, "legacy count");
         True(decoded != null && !decoded.Entities[0].Motion.HasValue, "legacy motion remains absent");
@@ -137,7 +137,7 @@ internal static class ReplicationMotionCodecTests
             TransportMessageKind.ReplicationTransformSnapshot,
             1,
             "host",
-            "GCOOP-REPL-1|1|1|1|" + encodedEntity);
+            ReplicationPayloadCodec.ProtocolVersion + "|1|1|1|" + encodedEntity);
         True(!ReplicationPayloadCodec.TryReadTransformSnapshot(envelope, out _, out _), "rejects " + name);
     }
 }

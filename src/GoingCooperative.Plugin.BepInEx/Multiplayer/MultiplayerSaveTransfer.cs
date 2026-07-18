@@ -375,6 +375,10 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             var deadline = DateTime.UtcNow + timeout;
             Exception? lastError = null;
+            var eventsPath = Path.ChangeExtension(primary, ".gmevents");
+            DateTime? fingerprintStableSince = null;
+            string lastFingerprint = string.Empty;
+            var stableSamples = 0;
             while (DateTime.UtcNow < deadline)
             {
                 try
@@ -383,10 +387,58 @@ namespace GoingCooperative.Plugin.BepInEx
                     {
                         using (File.Open(primary, FileMode.Open, FileAccess.Read, FileShare.Read)) { }
                         using (File.Open(primary + ".meta", FileMode.Open, FileAccess.Read, FileShare.Read)) { }
-                        return;
+                        var eventsExist = File.Exists(eventsPath);
+                        if (eventsExist)
+                        {
+                            using (File.Open(eventsPath, FileMode.Open, FileAccess.Read, FileShare.Read)) { }
+                        }
+
+                        var primaryInfo = new FileInfo(primary);
+                        var metaInfo = new FileInfo(primary + ".meta");
+                        var eventsInfo = eventsExist ? new FileInfo(eventsPath) : null;
+                        var fingerprint = primaryInfo.Length.ToString(CultureInfo.InvariantCulture)
+                            + ":" + primaryInfo.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture)
+                            + "|" + metaInfo.Length.ToString(CultureInfo.InvariantCulture)
+                            + ":" + metaInfo.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture)
+                            + "|" + (eventsInfo == null
+                                ? "absent"
+                                : eventsInfo.Length.ToString(CultureInfo.InvariantCulture)
+                                    + ":" + eventsInfo.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture));
+                        if (string.Equals(fingerprint, lastFingerprint, StringComparison.Ordinal))
+                        {
+                            stableSamples++;
+                        }
+                        else
+                        {
+                            lastFingerprint = fingerprint;
+                            stableSamples = 1;
+                            fingerprintStableSince = DateTime.UtcNow;
+                        }
+
+                        // Native save companions are written separately. Require a short
+                        // quiet window so an optional .gmevents file cannot appear just
+                        // after the primary and metadata files were accepted.
+                        if (stableSamples >= 2
+                            && fingerprintStableSince.HasValue
+                            && DateTime.UtcNow - fingerprintStableSince.Value >= TimeSpan.FromMilliseconds(500))
+                        {
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        fingerprintStableSince = null;
+                        lastFingerprint = string.Empty;
+                        stableSamples = 0;
                     }
                 }
-                catch (Exception ex) { lastError = ex; }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                    fingerprintStableSince = null;
+                    lastFingerprint = string.Empty;
+                    stableSamples = 0;
+                }
                 Thread.Sleep(50);
             }
             throw new IOException("Timed out waiting for the native save checkpoint to finish writing.", lastError);

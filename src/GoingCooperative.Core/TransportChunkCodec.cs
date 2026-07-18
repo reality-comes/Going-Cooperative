@@ -8,6 +8,7 @@ namespace GoingCooperative.Core
     public static class TransportChunkCodec
     {
         private const string Version = "GCOOP-CHUNK-1";
+        private const int MaxChunkCount = 512;
 
         public static IReadOnlyList<TransportEnvelope> CreateChunks(TransportEnvelope envelope, string chunkId, int maxChunkChars)
         {
@@ -28,6 +29,16 @@ namespace GoingCooperative.Core
 
             var encodedEnvelope = TransportEnvelopeCodec.Encode(envelope);
             var total = Math.Max(1, (encodedEnvelope.Length + maxChunkChars - 1) / maxChunkChars);
+            if (total > MaxChunkCount)
+            {
+                throw new InvalidOperationException(
+                    "Envelope requires "
+                    + total.ToString(CultureInfo.InvariantCulture)
+                    + " chunks; maximum is "
+                    + MaxChunkCount.ToString(CultureInfo.InvariantCulture)
+                    + ".");
+            }
+
             var chunks = new List<TransportEnvelope>(total);
             for (var index = 0; index < total; index++)
             {
@@ -71,7 +82,7 @@ namespace GoingCooperative.Core
                 return false;
             }
 
-            var parts = envelope.Payload.Split('|');
+            var parts = envelope.Payload.Split(new[] { '|' }, StringSplitOptions.None);
             if (parts.Length != 5)
             {
                 error = "expected chunk payload with 5 fields";
@@ -92,7 +103,7 @@ namespace GoingCooperative.Core
                 return false;
             }
 
-            if (index < 0 || total <= 0 || index >= total)
+            if (index < 0 || total <= 0 || total > MaxChunkCount || index >= total)
             {
                 error = "invalid chunk index";
                 return false;
@@ -126,6 +137,8 @@ namespace GoingCooperative.Core
     public sealed class TransportChunkReassembler
     {
         private readonly Dictionary<string, PendingChunkSet> pending = new Dictionary<string, PendingChunkSet>(StringComparer.Ordinal);
+        private static readonly TimeSpan PendingChunkLifetime = TimeSpan.FromSeconds(10);
+        private const int MaxPendingChunkSets = 128;
 
         public void Clear()
         {
@@ -135,6 +148,7 @@ namespace GoingCooperative.Core
         public bool TryAddChunk(TransportEnvelope chunkEnvelope, out TransportEnvelope? reassembled, out string error)
         {
             reassembled = null;
+            CleanupExpiredChunkSets(DateTime.UtcNow);
             if (!TransportChunkCodec.TryReadChunk(chunkEnvelope, out var chunkId, out var index, out var total, out var chunkText, out error))
             {
                 return false;
@@ -142,6 +156,7 @@ namespace GoingCooperative.Core
 
             if (!pending.TryGetValue(chunkId, out var set))
             {
+                TrimOldestChunkSetIfNeeded();
                 set = new PendingChunkSet(total);
                 pending[chunkId] = set;
             }
@@ -168,6 +183,52 @@ namespace GoingCooperative.Core
             return true;
         }
 
+        private void CleanupExpiredChunkSets(DateTime nowUtc)
+        {
+            if (pending.Count == 0)
+            {
+                return;
+            }
+
+            var expired = new List<string>();
+            foreach (var pair in pending)
+            {
+                if (nowUtc - pair.Value.LastUpdatedUtc > PendingChunkLifetime)
+                {
+                    expired.Add(pair.Key);
+                }
+            }
+
+            for (var i = 0; i < expired.Count; i++)
+            {
+                pending.Remove(expired[i]);
+            }
+        }
+
+        private void TrimOldestChunkSetIfNeeded()
+        {
+            if (pending.Count < MaxPendingChunkSets)
+            {
+                return;
+            }
+
+            string? oldestKey = null;
+            var oldestAt = DateTime.MaxValue;
+            foreach (var pair in pending)
+            {
+                if (pair.Value.LastUpdatedUtc < oldestAt)
+                {
+                    oldestAt = pair.Value.LastUpdatedUtc;
+                    oldestKey = pair.Key;
+                }
+            }
+
+            if (oldestKey != null)
+            {
+                pending.Remove(oldestKey);
+            }
+        }
+
         private sealed class PendingChunkSet
         {
             private readonly string?[] chunks;
@@ -177,9 +238,12 @@ namespace GoingCooperative.Core
             {
                 Total = total;
                 chunks = new string?[total];
+                LastUpdatedUtc = DateTime.UtcNow;
             }
 
             public int Total { get; }
+
+            public DateTime LastUpdatedUtc { get; private set; }
 
             public bool Complete
             {
@@ -188,6 +252,7 @@ namespace GoingCooperative.Core
 
             public void Set(int index, string text)
             {
+                LastUpdatedUtc = DateTime.UtcNow;
                 if (chunks[index] == null)
                 {
                     received++;

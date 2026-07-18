@@ -12,6 +12,8 @@ namespace GoingCooperative.Plugin.BepInEx
 
         bool ApplyBuild(string blueprintId, int x, int y, int z, int angleY, string buildingType, string factionOwnership, bool afterLoading, out string detail);
 
+        bool ApplyBuildBatch(string blueprintId, string buildingType, string factionOwnership, bool afterLoading, string[] placementRecords, out string detail);
+
         bool ApplyCutPlant(int uniqueId, string blueprintId, int x, int y, int z, int worldX, int worldY, int worldZ, out string detail);
 
         bool ApplyRegionOrder(string orderType, int startX, int startY, int startZ, int endX, int endY, int endZ, string allowType, string areaType, string subType, out string detail);
@@ -75,6 +77,23 @@ namespace GoingCooperative.Plugin.BepInEx
                     return ApplyAction((out string detail) => actions.ApplyDig(startX, startY, startZ, endX, endY, endZ, out detail));
 
                 case CommandKind.Build:
+                    if (LockstepCommandPayloads.TryReadBuildBatchPayload(
+                        command.PayloadJson,
+                        out var batchBlueprintId,
+                        out var batchBuildingType,
+                        out var batchFactionOwnership,
+                        out var batchAfterLoading,
+                        out var placementRecords))
+                    {
+                        return ApplyAction((out string detail) => actions.ApplyBuildBatch(
+                            batchBlueprintId,
+                            batchBuildingType,
+                            batchFactionOwnership,
+                            batchAfterLoading,
+                            placementRecords,
+                            out detail));
+                    }
+
                     if (!LockstepCommandPayloads.TryReadBuildPayload(command.PayloadJson, out var blueprintId, out var x, out var y, out var z, out var angleY, out var buildingType, out var factionOwnership, out var afterLoading))
                     {
                         return new RuntimeCommandResult(false, "build-payload-invalid");

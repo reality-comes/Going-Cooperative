@@ -13,9 +13,15 @@ $outputDirectory = Join-Path $repositoryRoot "artifacts\tests"
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $output = Join-Path $outputDirectory "CorePolicyTests.exe"
 $sources = @(
+    (Join-Path $repositoryRoot "src\GoingCooperative.Core\BuildingReplicationV2Policy.cs"),
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\CoordinateResolverPolicy.cs"),
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\CombatPresentationOrderingPolicy.cs"),
+    (Join-Path $repositoryRoot "src\GoingCooperative.Core\ReplicationOrderingPolicy.cs"),
+    (Join-Path $repositoryRoot "src\GoingCooperative.Core\TransportContracts.cs"),
+    (Join-Path $repositoryRoot "src\GoingCooperative.Core\TransportEnvelopeCodec.cs"),
+    (Join-Path $repositoryRoot "src\GoingCooperative.Core\TransportChunkCodec.cs"),
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\LockstepCommandPayloads.cs"),
+    (Join-Path $repositoryRoot "tests\BuildingReplicationV2PolicyTests.cs"),
     (Join-Path $repositoryRoot "tests\CorePolicyTests.cs")
 )
 
@@ -39,6 +45,32 @@ foreach ($line in Get-Content -LiteralPath $releaseConfig) {
 }
 if ($settings["enabled"] -ne "false") { throw "Release config must leave replication disabled until the Multiplayer UI starts a session." }
 if ($settings["multiplayermenu"] -ne "true") { throw "Release config must enable the Multiplayer UI." }
-if ($settings["semanticagentpresentation"] -ne "false") { throw "Release config must leave experimental semantic agent presentation disabled by default." }
+foreach ($testedGate in @(
+    "semanticagentpresentation",
+    "semanticworkcycledriver",
+    "buildingreplicationv2",
+    "eventreplication",
+    "eventlifecyclereplication",
+    "eventdialogreplication",
+    "eventchoicecommands",
+    "eventspeedreplication",
+    "weatherreplication",
+    "weathertemperaturereplication",
+    "eventdiagnostics")) {
+    if ($settings[$testedGate] -ne "true") { throw "Committed test config must enable $testedGate." }
+}
+foreach ($disabledGate in @(
+    "eventschedulerauthority",
+    "eventtraderauthority",
+    "eventwarningreplication",
+    "eventnoticereplication",
+    "eventexternalagentlifecycle",
+    "eventenvironmentmutationreplication",
+    "playertriggeredeventreplication",
+    "weatherschedulerauthority")) {
+    if ($settings.ContainsKey($disabledGate) -and $settings[$disabledGate] -ne "false") {
+        throw "Committed test config must leave $disabledGate disabled."
+    }
+}
 if ($settings.ContainsKey("mode") -or $settings.ContainsKey("host")) { throw "Release config must not hard-code a session role or host address." }
-Write-Host "PASS ReleaseConfigPolicy"
+Write-Host "PASS TestedConfigPolicy"

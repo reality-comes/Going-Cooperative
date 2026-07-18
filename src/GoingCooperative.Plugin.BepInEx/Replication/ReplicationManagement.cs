@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
 using GoingCooperative.Core;
@@ -12,7 +13,18 @@ namespace GoingCooperative.Plugin.BepInEx
     public sealed partial class GoingCooperativePlugin
     {
         private const string ManagementDeltaKind = "ManagementState";
+        private const string AnimalStateDeltaKind = "AnimalState";
+        private const float ReplicationAnimalAppearanceSnapshotSeconds = 10f;
         private static bool replicationApplyingProductionRemoval;
+        // Model mutations belonging to one native action commonly arrive as a short burst
+        // (for example: decrement training attempts, then write trainer/result; or unrope,
+        // change animal type, then clear the order).  Hold the animal reference only until
+        // the host's next runtime pump so one authoritative, final state is sent.
+        private static readonly Dictionary<object, string> ReplicationPendingAnimalStateByAnimal =
+            new Dictionary<object, string>(ReferenceObjectComparer.Instance);
+        private static readonly Dictionary<string, string> ReplicationLastAnimalAppearanceSignatureByEntityId =
+            new Dictionary<string, string>(StringComparer.Ordinal);
+        private static float replicationNextAnimalAppearanceSnapshotRealtime;
 
         private int TryInstallReplicationManagementCapture(Harmony harmony)
         {
@@ -38,7 +50,22 @@ namespace GoingCooperative.Plugin.BepInEx
             if (hourType != null && soundButton != null) count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerScheduleManager", "ChangeHourType", new[] { soundButton, hourType }, nameof(ReplicationWorkerScheduleButtonPrefix), nameof(ReplicationManagementPolicyPostfix));
             var animalOrderType = AccessTools.TypeByName("NSMedieval.Types.AnimalOrderType");
             var animalInstance = AccessTools.TypeByName("NSMedieval.State.AnimalInstance");
-            if (animalOrderType != null && animalInstance != null) count += PatchManagementMethod(harmony, "NSMedieval.Controllers.AnimalController", "MarkForOrder", new[] { animalOrderType, animalInstance }, nameof(ReplicationAnimalOrderPrefix), nameof(ReplicationAnimalOrderPostfix));
+            if (animalOrderType != null && animalInstance != null)
+            {
+                count += PatchManagementMethod(harmony, "NSMedieval.Controllers.AnimalController", "MarkForOrder", new[] { animalOrderType, animalInstance }, nameof(ReplicationAnimalOrderPrefix), nameof(ReplicationAnimalOrderPostfix));
+                count += PatchManagementMethod(harmony, "NSMedieval.State.AnimalInstance", "TrainingAttemptCompleted", Type.EmptyTypes, nameof(ReplicationAnimalStatePrefix), nameof(ReplicationAnimalTrainingAttemptPostfix));
+                count += PatchManagementMethod(harmony, "NSMedieval.State.AnimalInstance", "ResetPetOwner", Type.EmptyTypes, nameof(ReplicationAnimalStatePrefix), nameof(ReplicationAnimalStateMutationPostfix));
+                var animalType = AccessTools.TypeByName("NSMedieval.Types.AnimalType");
+                if (animalType != null)
+                {
+                    count += PatchManagementMethod(harmony, "NSMedieval.State.AnimalInstance", "SetAnimalType", new[] { animalType }, nameof(ReplicationAnimalStatePrefix), nameof(ReplicationAnimalStateMutationPostfix));
+                }
+                var humanoidInstance = AccessTools.TypeByName("NSMedieval.State.HumanoidInstance");
+                if (humanoidInstance != null)
+                {
+                    count += PatchManagementMethod(harmony, "NSMedieval.State.AnimalInstance", "SetLastTrainingAttemptInfo", new[] { humanoidInstance, typeof(bool) }, nameof(ReplicationAnimalStatePrefix), nameof(ReplicationAnimalStateMutationPostfix));
+                }
+            }
             LogReplicationInfo("Going Cooperative replication management capture patches=" + count.ToString(CultureInfo.InvariantCulture));
             return count;
         }
@@ -92,10 +119,10 @@ namespace GoingCooperative.Plugin.BepInEx
             __state = null;
             if (IsReplicationRegionOrderStateCaptureSuppressed()) return true;
             var order = __0?.ToString() ?? string.Empty;
-            if (!string.Equals(order, "Hunt", StringComparison.Ordinal)
-                && !string.Equals(order, "None", StringComparison.Ordinal)) return true;
+            var orderValue = Convert.ToInt32(__0, CultureInfo.InvariantCulture);
+            if (!IsReplicationSupportedAnimalOrder(order, orderValue)) return true;
             if (__1 == null || !TryGetReplicationAgentOwnerEntityId(__1, out var entityId, out _)) return true;
-            __state = LockstepCommandPayloads.CreateManagementPolicyPayload("AnimalOrder", entityId, order, 0, Convert.ToInt32(__0, CultureInfo.InvariantCulture), true);
+            __state = LockstepCommandPayloads.CreateManagementPolicyPayload("AnimalOrder", entityId, order, 0, orderValue, true);
             if (ShouldSendReplicationLocalCommandIntent())
             {
                 SendReplicationManagementIntent(__state, "animal-order:" + order);
@@ -107,6 +134,34 @@ namespace GoingCooperative.Plugin.BepInEx
         private static void ReplicationAnimalOrderPostfix(string? __state)
         {
             BroadcastHostManagementMutation(__state, "animal-order-model");
+        }
+
+        private static bool ReplicationAnimalStatePrefix()
+        {
+            return true;
+        }
+
+        private static void ReplicationAnimalTrainingAttemptPostfix(object __instance)
+        {
+            MarkReplicationAnimalStateDirty(__instance, "training-attempt");
+        }
+
+        private static void ReplicationAnimalStateMutationPostfix(object __instance)
+        {
+            MarkReplicationAnimalStateDirty(__instance, "model-mutation");
+        }
+
+        private static void MarkReplicationAnimalStateDirty(object? animal, string reason)
+        {
+            if (animal == null || !replicationConfigHostMode || !replicationRuntimeStarted || !replicationRemoteHelloReceived)
+            {
+                return;
+            }
+
+            ReplicationPendingAnimalStateByAnimal[animal] = reason;
+            instance?.LogReplicationInfo("Going Cooperative animal-state dirty reason=" + reason
+                + " type=" + FormatShortTypeName(animal.GetType())
+                + " pending=" + ReplicationPendingAnimalStateByAnimal.Count.ToString(CultureInfo.InvariantCulture));
         }
 
         private static bool ReplicationWorkerScheduleButtonPrefix(object __instance, object __0, object __1, ref string? __state)
@@ -432,6 +487,8 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             if (string.Equals(policy, "AnimalOrder", StringComparison.Ordinal))
             {
+                if (!IsReplicationSupportedAnimalOrder(key, value))
+                { detail = "animal-order-invalid order=" + key + " value=" + value.ToString(CultureInfo.InvariantCulture); return false; }
                 if (!TryFindReplicationAnimatedAgentViewByEntityId(targetId, out var view, out var animalLookup) || view == null)
                 { detail = "animal-order-target-missing " + animalLookup; return false; }
                 var animal = AccessTools.Property(view.GetType(), "AnimalInstance")?.GetValue(view, null)
@@ -487,6 +544,603 @@ namespace GoingCooperative.Plugin.BepInEx
                 detail = "ok stockpile-resource objectId=" + targetId + " resourceId=" + key + " allowed=" + enabled; return true;
             }
             detail = "management-policy-unsupported policy=" + policy; return false;
+        }
+
+        private static bool IsReplicationSupportedAnimalOrder(string order, int value)
+        {
+            return string.Equals(order, "None", StringComparison.Ordinal) && value == 0
+                || string.Equals(order, "Hunt", StringComparison.Ordinal) && value == 1
+                || string.Equals(order, "Tame", StringComparison.Ordinal) && value == 2
+                || string.Equals(order, "Harvest", StringComparison.Ordinal) && value == 3
+                || string.Equals(order, "Slaughter", StringComparison.Ordinal) && value == 4
+                || string.Equals(order, "Train", StringComparison.Ordinal) && value == 5
+                || string.Equals(order, "Release", StringComparison.Ordinal) && value == 6;
+        }
+
+        private void UpdateReplicationAnimalState()
+        {
+            if (!replicationConfigHostMode || !replicationRuntimeStarted || !replicationRemoteHelloReceived)
+            {
+                return;
+            }
+
+            QueueHostReplicationAnimalAppearanceSnapshotIfDue();
+            if (ReplicationPendingAnimalStateByAnimal.Count == 0)
+            {
+                return;
+            }
+
+            var pending = new List<KeyValuePair<object, string>>(ReplicationPendingAnimalStateByAnimal);
+            ReplicationPendingAnimalStateByAnimal.Clear();
+            for (var i = 0; i < pending.Count; i++)
+            {
+                SendHostReplicationAnimalState(pending[i].Key, pending[i].Value);
+            }
+        }
+
+        private static void QueueHostReplicationAnimalAppearanceSnapshotIfDue()
+        {
+            if (Time.realtimeSinceStartup < replicationNextAnimalAppearanceSnapshotRealtime)
+            {
+                return;
+            }
+
+            replicationNextAnimalAppearanceSnapshotRealtime = Time.realtimeSinceStartup + ReplicationAnimalAppearanceSnapshotSeconds;
+            var views = FindReplicationAnimatedAgentViews();
+            var queued = 0;
+            for (var i = 0; i < views.Length; i++)
+            {
+                var view = views[i];
+                if (view == null
+                    || view is not MonoBehaviour behaviour
+                    || behaviour.gameObject == null
+                    || !behaviour.gameObject.activeInHierarchy
+                    || !TryClassifyReplicationView(view, out var kind)
+                    || !string.Equals(kind, "animal", StringComparison.OrdinalIgnoreCase)
+                    || !TryGetReplicationViewEntityId(view, out var entityId)
+                    || string.IsNullOrWhiteSpace(entityId))
+                {
+                    continue;
+                }
+
+                var animal = AccessTools.Property(view.GetType(), "AnimalInstance")?.GetValue(view, null)
+                    ?? AccessTools.Field(view.GetType(), "animalInstance")?.GetValue(view);
+                if (animal == null
+                    || !TryReadReplicationAnimalAppearance(animal, out _, out _, out _, out var appearanceSignature, out _))
+                {
+                    continue;
+                }
+
+                if (ReplicationLastAnimalAppearanceSignatureByEntityId.TryGetValue(entityId, out var previousSignature)
+                    && string.Equals(previousSignature, appearanceSignature, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                ReplicationLastAnimalAppearanceSignatureByEntityId[entityId] = appearanceSignature;
+                ReplicationPendingAnimalStateByAnimal[animal] = "appearance-snapshot";
+                queued++;
+            }
+
+            if (queued > 0)
+            {
+                instance?.LogReplicationInfo("Going Cooperative animal appearance snapshot queued="
+                    + queued.ToString(CultureInfo.InvariantCulture));
+            }
+        }
+
+        private void SendHostReplicationAnimalState(object animal, string reason)
+        {
+            var hasEntityId = TryGetReplicationAnimalEntityId(animal, out var entityId, out var entityLookup);
+            if (!replicationConfigHostMode || !replicationRuntimeStarted || !replicationRemoteHelloReceived
+                || !hasEntityId)
+            {
+                LogReplicationWarning("Going Cooperative animal-state send skipped reason=" + reason
+                    + " lookup=" + entityLookup);
+                return;
+            }
+
+            var order = Convert.ToInt32(AccessTools.Property(animal.GetType(), "OrderType")?.GetValue(animal, null) ?? 0, CultureInfo.InvariantCulture);
+            var animalType = Convert.ToInt32(AccessTools.Property(animal.GetType(), "AnimalType")?.GetValue(animal, null) ?? 0, CultureInfo.InvariantCulture);
+            var trainingAttempts = Convert.ToInt32(AccessTools.Property(animal.GetType(), "CurrentTrainingAttemptsLeft")?.GetValue(animal, null) ?? 0, CultureInfo.InvariantCulture);
+            var trainer = Convert.ToString(AccessTools.Property(animal.GetType(), "LastTrainerName")?.GetValue(animal, null), CultureInfo.InvariantCulture) ?? string.Empty;
+            var trainingSuccess = Convert.ToBoolean(AccessTools.Property(animal.GetType(), "LastTrainingAttemptSuccessful")?.GetValue(animal, null) ?? false, CultureInfo.InvariantCulture);
+            var hasTrainingStat = TryReadReplicationAnimalTrainingStat(animal, out _, out var trainingCurrent, out var trainingMax, out var trainingStatDetail);
+            var hasAppearance = TryReadReplicationAnimalAppearance(
+                animal,
+                out var furColor,
+                out var furColorName,
+                out var furTexture,
+                out var appearanceSignature,
+                out var appearanceDetail);
+            if (hasAppearance)
+            {
+                ReplicationLastAnimalAppearanceSignatureByEntityId[entityId] = appearanceSignature;
+            }
+            var petOwner = AccessTools.Property(animal.GetType(), "PetOwner")?.GetValue(animal, null);
+            var petOwnerId = petOwner != null && TryGetReplicationAgentOwnerEntityId(petOwner, out var resolvedOwnerId, out _)
+                ? resolvedOwnerId
+                : string.Empty;
+            var ropedTo = AccessTools.Method(animal.GetType(), "RopedTo", Type.EmptyTypes)?.Invoke(animal, null);
+            var ropeTargetId = ropedTo != null && TryGetReplicationAgentOwnerEntityId(ropedTo, out var resolvedRopeId, out _)
+                ? resolvedRopeId
+                : string.Empty;
+            var leaving = TryReadInstanceMemberValue(animal, "isLeavingMap", out var rawLeaving)
+                && rawLeaving is bool leavingMap && leavingMap;
+            var uniqueId = TryParseReplicationEntityNumericId(entityId, out var parsedId) ? parsedId : 0L;
+            SendReplicationWorldObjectDelta(new ReplicationWorldObjectDelta(
+                ++replicationWorldObjectDeltaSequence,
+                Time.realtimeSinceStartup,
+                AnimalStateDeltaKind,
+                uniqueId,
+                string.Empty,
+                0,
+                0,
+                0,
+                "entityId=" + entityId
+                    + " order=" + order.ToString(CultureInfo.InvariantCulture)
+                    + " animalType=" + animalType.ToString(CultureInfo.InvariantCulture)
+                    + " trainingAttempts=" + trainingAttempts.ToString(CultureInfo.InvariantCulture)
+                    + " trainerB64=" + EncodeReplicationDetailBase64(trainer)
+                    + " trainingSuccess=" + trainingSuccess.ToString().ToLowerInvariant()
+                    + " trainingStat=" + hasTrainingStat.ToString().ToLowerInvariant()
+                    + " trainingCurrent=" + trainingCurrent.ToString("R", CultureInfo.InvariantCulture)
+                    + " trainingMax=" + trainingMax.ToString("R", CultureInfo.InvariantCulture)
+                    + " appearance=" + hasAppearance.ToString().ToLowerInvariant()
+                    + " furColorR=" + furColor.r.ToString("R", CultureInfo.InvariantCulture)
+                    + " furColorG=" + furColor.g.ToString("R", CultureInfo.InvariantCulture)
+                    + " furColorB=" + furColor.b.ToString("R", CultureInfo.InvariantCulture)
+                    + " furColorA=" + furColor.a.ToString("R", CultureInfo.InvariantCulture)
+                    + " furColorNameB64=" + EncodeReplicationDetailBase64(furColorName)
+                    + " furTextureB64=" + EncodeReplicationDetailBase64(furTexture)
+                    + " petOwnerB64=" + EncodeReplicationDetailBase64(petOwnerId)
+                    + " ropeTargetB64=" + EncodeReplicationDetailBase64(ropeTargetId)
+                    + " leaving=" + leaving.ToString().ToLowerInvariant()
+                    + " reason=" + reason));
+            LogReplicationInfo("Going Cooperative animal-state sent entityId=" + entityId
+                + " reason=" + reason
+                + " order=" + order.ToString(CultureInfo.InvariantCulture)
+                + " animalType=" + animalType.ToString(CultureInfo.InvariantCulture)
+                + " trainingAttempts=" + trainingAttempts.ToString(CultureInfo.InvariantCulture)
+                + " trainingStat=" + trainingStatDetail
+                + " appearance=" + appearanceDetail);
+        }
+
+        private static bool TryReadReplicationAnimalAppearance(
+            object animal,
+            out Color furColor,
+            out string furColorName,
+            out string furTexture,
+            out string signature,
+            out string detail)
+        {
+            furColor = Color.white;
+            furColorName = string.Empty;
+            furTexture = string.Empty;
+            signature = string.Empty;
+            if (!TryReadReplicationObjectState(animal, "FurColor", out var rawColor) || rawColor is not Color resolvedColor
+                || !TryReadReplicationObjectState(animal, "FurColorName", out var rawColorName) || rawColorName == null
+                || !TryReadReplicationObjectState(animal, "FurTexture", out var rawTexture) || rawTexture == null)
+            {
+                detail = "fur-state-missing";
+                return false;
+            }
+
+            furColor = resolvedColor;
+            furColorName = Convert.ToString(rawColorName, CultureInfo.InvariantCulture) ?? string.Empty;
+            furTexture = Convert.ToString(rawTexture, CultureInfo.InvariantCulture) ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(furTexture))
+            {
+                detail = "fur-texture-empty";
+                return false;
+            }
+
+            signature = furTexture
+                + "|" + furColorName
+                + "|" + furColor.r.ToString("R", CultureInfo.InvariantCulture)
+                + "|" + furColor.g.ToString("R", CultureInfo.InvariantCulture)
+                + "|" + furColor.b.ToString("R", CultureInfo.InvariantCulture)
+                + "|" + furColor.a.ToString("R", CultureInfo.InvariantCulture);
+            detail = "texture=" + FormatReplicationWorldObjectDetailToken(furTexture)
+                + ",colorName=" + FormatReplicationWorldObjectDetailToken(furColorName);
+            return true;
+        }
+
+        private static bool TryApplyReplicationAnimalAppearance(
+            object view,
+            object animal,
+            int animalType,
+            Color furColor,
+            string furColorName,
+            string furTexture,
+            out string detail)
+        {
+            var fields = 0;
+            fields += TrySetInstanceMemberValue(animal, "furColor", furColor) ? 1 : 0;
+            fields += TrySetInstanceMemberValue(animal, "furColorName", furColorName) ? 1 : 0;
+            fields += TrySetInstanceMemberValue(animal, "furTexture", furTexture) ? 1 : 0;
+            var setMaterial = AccessTools.Method(view.GetType(), "SetMaterialBasedOnType");
+            if (fields != 3 || setMaterial == null || setMaterial.GetParameters().Length != 1)
+            {
+                detail = "appearance-surface-missing fields=" + fields.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
+
+            try
+            {
+                var typeValue = Enum.ToObject(setMaterial.GetParameters()[0].ParameterType, animalType);
+                setMaterial.Invoke(view, new[] { typeValue });
+                detail = "ok texture=" + FormatReplicationWorldObjectDetailToken(furTexture)
+                    + ",colorName=" + FormatReplicationWorldObjectDetailToken(furColorName)
+                    + ",fields=" + fields.ToString(CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+        }
+
+        private static void ResetReplicationAnimalStateRuntime()
+        {
+            ReplicationPendingAnimalStateByAnimal.Clear();
+            ReplicationLastAnimalAppearanceSignatureByEntityId.Clear();
+            replicationNextAnimalAppearanceSnapshotRealtime = 0f;
+        }
+
+        private static bool TryReadReplicationAnimalTrainingStat(
+            object animal,
+            out object? stat,
+            out float current,
+            out float max,
+            out string detail)
+        {
+            stat = null;
+            current = 0f;
+            max = 0f;
+            if (!TryReadReplicationObjectState(animal, "Stats", out var stats) || stats == null)
+            {
+                detail = "stats-missing";
+                return false;
+            }
+
+            var statType = AccessTools.TypeByName("NSMedieval.StatsSystem.StatType");
+            if (statType == null || !statType.IsEnum)
+            {
+                detail = "stat-type-missing";
+                return false;
+            }
+
+            try
+            {
+                var animalUntrained = Enum.Parse(statType, "AnimalUntrained", true);
+                var getStat = FindReplicationInstanceMethod(stats.GetType(), "GetStat", new[] { statType });
+                stat = getStat?.Invoke(stats, new[] { animalUntrained });
+                if (stat == null
+                    || !TryReadReplicationObjectState(stat, "Current", out var rawCurrent) || rawCurrent == null
+                    || !TryReadReplicationObjectState(stat, "Max", out var rawMax) || rawMax == null)
+                {
+                    detail = "animal-untrained-stat-missing";
+                    return false;
+                }
+
+                current = Convert.ToSingle(rawCurrent, CultureInfo.InvariantCulture);
+                max = Convert.ToSingle(rawMax, CultureInfo.InvariantCulture);
+                if (float.IsNaN(current) || float.IsInfinity(current)
+                    || float.IsNaN(max) || float.IsInfinity(max) || max <= 0f)
+                {
+                    detail = "animal-untrained-stat-invalid";
+                    return false;
+                }
+
+                detail = "current=" + current.ToString("R", CultureInfo.InvariantCulture)
+                    + ",max=" + max.ToString("R", CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+        }
+
+        private static bool TryApplyReplicationAnimalTrainingStat(
+            object animal,
+            float authoritativeCurrent,
+            out float currentReadback,
+            out int percentageReadback,
+            out string detail)
+        {
+            currentReadback = 0f;
+            percentageReadback = -1;
+            if (!TryReadReplicationAnimalTrainingStat(animal, out var stat, out _, out var localMax, out detail) || stat == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                var forceCurrent = FindReplicationInstanceMethod(stat.GetType(), "ForceCurrentValue", new[] { typeof(float) })
+                    ?? FindReplicationInstanceMethod(stat.GetType(), "SetCurrent", new[] { typeof(float) });
+                if (forceCurrent == null)
+                {
+                    detail = "animal-untrained-stat-setter-missing";
+                    return false;
+                }
+
+                forceCurrent.Invoke(stat, new object[] { authoritativeCurrent });
+                if (!TryReadReplicationObjectState(stat, "Current", out var rawReadback) || rawReadback == null)
+                {
+                    detail = "animal-untrained-stat-readback-missing";
+                    return false;
+                }
+
+                currentReadback = Convert.ToSingle(rawReadback, CultureInfo.InvariantCulture);
+                percentageReadback = Convert.ToInt32(
+                    AccessTools.Method(animal.GetType(), "GetTrainedPercentage", Type.EmptyTypes)?.Invoke(animal, null) ?? -1,
+                    CultureInfo.InvariantCulture);
+                detail = "ok current=" + currentReadback.ToString("R", CultureInfo.InvariantCulture)
+                    + ",max=" + localMax.ToString("R", CultureInfo.InvariantCulture)
+                    + ",percent=" + percentageReadback.ToString(CultureInfo.InvariantCulture);
+                return Math.Abs(currentReadback - authoritativeCurrent) <= 0.001f;
+            }
+            catch (Exception ex)
+            {
+                detail = FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+        }
+
+        private static bool TryGetReplicationAnimalEntityId(object animal, out string entityId, out string detail)
+        {
+            if (TryGetReplicationAgentOwnerEntityId(animal, out entityId, out detail))
+            {
+                return true;
+            }
+
+            var managerType = AccessTools.TypeByName("NSMedieval.Manager.AnimalManager");
+            var manager = managerType == null
+                ? null
+                : AccessTools.Property(managerType, "Instance")?.GetValue(null, null)
+                    ?? AccessTools.Field(managerType, "Instance")?.GetValue(null);
+            if (manager == null)
+            {
+                detail = "animal-manager-missing; " + detail;
+                entityId = string.Empty;
+                return false;
+            }
+
+            MethodInfo? getView = null;
+            var methods = manager.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            for (var i = 0; i < methods.Length; i++)
+            {
+                var candidate = methods[i];
+                var parameters = candidate.GetParameters();
+                if (candidate.Name == "GetView" && parameters.Length == 1 && parameters[0].ParameterType.IsInstanceOfType(animal))
+                {
+                    getView = candidate;
+                    break;
+                }
+            }
+
+            try
+            {
+                var view = getView?.Invoke(manager, new[] { animal });
+                if (view != null && TryGetReplicationViewEntityId(view, out entityId))
+                {
+                    detail = "animal-manager-view";
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                detail = "animal-manager-view-failed " + ex.GetType().Name;
+                entityId = string.Empty;
+                return false;
+            }
+
+            detail = "animal-manager-view-unresolved; " + detail;
+            entityId = string.Empty;
+            return false;
+        }
+
+        private static bool TryApplyReplicationAnimalStateDelta(ReplicationWorldObjectDelta delta, out string detail)
+        {
+            if (!TryReadReplicationWorldObjectDetailToken(delta.Detail, "entityId", out var entityId)
+                || !TryReadReplicationWorldObjectDetailInt(delta.Detail, "order", out var order)
+                || !TryReadReplicationWorldObjectDetailInt(delta.Detail, "animalType", out var animalType)
+                || !TryReadReplicationWorldObjectDetailInt(delta.Detail, "trainingAttempts", out var trainingAttempts)
+                || !TryReadReplicationWorldObjectDetailBool(delta.Detail, "trainingSuccess", out var trainingSuccess)
+                || !TryReadReplicationWorldObjectDetailToken(delta.Detail, "trainerB64", out var trainerToken)
+                || !TryDecodeReplicationOptionalDetailBase64(trainerToken, out var trainer)
+                || !TryReadReplicationWorldObjectDetailToken(delta.Detail, "petOwnerB64", out var petOwnerToken)
+                || !TryDecodeReplicationOptionalDetailBase64(petOwnerToken, out var petOwnerId)
+                || !TryReadReplicationWorldObjectDetailToken(delta.Detail, "ropeTargetB64", out var ropeTargetToken)
+                || !TryDecodeReplicationOptionalDetailBase64(ropeTargetToken, out var ropeTargetId)
+                || !TryFindReplicationAnimatedAgentViewByEntityId(entityId, out var view, out var lookup)
+                || view == null)
+            {
+                detail = "animal-state-invalid-or-missing";
+                return false;
+            }
+
+            var animal = AccessTools.Property(view.GetType(), "AnimalInstance")?.GetValue(view, null)
+                ?? AccessTools.Field(view.GetType(), "animalInstance")?.GetValue(view);
+            if (animal == null)
+            {
+                detail = "animal-state-instance-missing " + lookup;
+                return false;
+            }
+
+            var animalModelType = animal.GetType();
+            var hasTrainingStat = TryReadReplicationWorldObjectDetailBool(delta.Detail, "trainingStat", out var trainingStatIncluded)
+                && trainingStatIncluded;
+            var trainingCurrent = 0f;
+            var hostTrainingMax = 0f;
+            if (hasTrainingStat
+                && (!TryReadReplicationWorldObjectDetailFloat(delta.Detail, "trainingCurrent", out trainingCurrent)
+                    || !TryReadReplicationWorldObjectDetailFloat(delta.Detail, "trainingMax", out hostTrainingMax)))
+            {
+                detail = "animal-state-training-stat-invalid";
+                return false;
+            }
+
+            var hasAppearance = TryReadReplicationWorldObjectDetailBool(delta.Detail, "appearance", out var appearanceIncluded)
+                && appearanceIncluded;
+            var authoritativeFurColor = Color.white;
+            var authoritativeFurColorName = string.Empty;
+            var authoritativeFurTexture = string.Empty;
+            if (hasAppearance
+                && (!TryReadReplicationWorldObjectDetailFloat(delta.Detail, "furColorR", out authoritativeFurColor.r)
+                    || !TryReadReplicationWorldObjectDetailFloat(delta.Detail, "furColorG", out authoritativeFurColor.g)
+                    || !TryReadReplicationWorldObjectDetailFloat(delta.Detail, "furColorB", out authoritativeFurColor.b)
+                    || !TryReadReplicationWorldObjectDetailFloat(delta.Detail, "furColorA", out authoritativeFurColor.a)
+                    || !TryReadReplicationWorldObjectDetailToken(delta.Detail, "furColorNameB64", out var furColorNameToken)
+                    || !TryDecodeReplicationOptionalDetailBase64(furColorNameToken, out authoritativeFurColorName)
+                    || !TryReadReplicationWorldObjectDetailToken(delta.Detail, "furTextureB64", out var furTextureToken)
+                    || !TryDecodeReplicationOptionalDetailBase64(furTextureToken, out authoritativeFurTexture)
+                    || string.IsNullOrWhiteSpace(authoritativeFurTexture)))
+            {
+                detail = "animal-state-appearance-invalid";
+                return false;
+            }
+
+            var setOrder = AccessTools.Method(animalModelType, "SetOrder");
+            var setAnimalType = AccessTools.Method(animalModelType, "SetAnimalType");
+            if (setOrder == null || setAnimalType == null)
+            {
+                detail = "animal-state-model-surface-missing " + lookup;
+                return false;
+            }
+
+            setAnimalType.Invoke(animal, new[] { Enum.ToObject(setAnimalType.GetParameters()[0].ParameterType, animalType) });
+            var orderValue = Enum.ToObject(setOrder.GetParameters()[0].ParameterType, order);
+            var animalControllerType = AccessTools.TypeByName("NSMedieval.Controllers.AnimalController");
+            var animalController = animalControllerType == null ? null : ResolveReplicationUnityManagerInstance(animalControllerType);
+            var markForOrder = animalControllerType == null
+                ? null
+                : AccessTools.Method(animalControllerType, "MarkForOrder", new[] { orderValue.GetType(), animalModelType });
+            var orderApply = "direct";
+            if (animalController != null && markForOrder != null)
+            {
+                BeginReplicationRegionOrderStateCaptureSuppression();
+                try
+                {
+                    markForOrder.Invoke(animalController, new[] { orderValue, animal });
+                    orderApply = "controller";
+                }
+                finally
+                {
+                    EndReplicationRegionOrderStateCaptureSuppression();
+                }
+            }
+            else
+            {
+                setOrder.Invoke(animal, new[] { orderValue });
+            }
+
+            var maxAttempts = TryReadReplicationStaticIntMember(animalModelType, "MaxDailyTrainingAttempts", out var configuredMaxAttempts)
+                ? Math.Max(0, configuredMaxAttempts)
+                : 1;
+            var usedAttempts = Math.Max(0, maxAttempts - Math.Max(0, trainingAttempts));
+            var fields = 0;
+            fields += TrySetInstanceMemberValue(animal, "trainingAttemptsCount", usedAttempts) ? 1 : 0;
+            fields += TrySetInstanceMemberValue(animal, "lastTrainerName", trainer) ? 1 : 0;
+            fields += TrySetInstanceMemberValue(animal, "lastTrainingAttemptSuccessful", trainingSuccess) ? 1 : 0;
+            var trainingStatApplied = !hasTrainingStat;
+            var trainingCurrentReadback = 0f;
+            var trainingPercentageReadback = -1;
+            var trainingStatApplyDetail = "not-included";
+            if (hasTrainingStat)
+            {
+                trainingStatApplied = TryApplyReplicationAnimalTrainingStat(
+                    animal,
+                    trainingCurrent,
+                    out trainingCurrentReadback,
+                    out trainingPercentageReadback,
+                    out trainingStatApplyDetail);
+            }
+            var appearanceApplied = !hasAppearance;
+            var appearanceApplyDetail = "not-included";
+            if (hasAppearance)
+            {
+                appearanceApplied = TryApplyReplicationAnimalAppearance(
+                    view,
+                    animal,
+                    animalType,
+                    authoritativeFurColor,
+                    authoritativeFurColorName,
+                    authoritativeFurTexture,
+                    out appearanceApplyDetail);
+            }
+
+            var resetOwner = AccessTools.Method(animalModelType, "ResetPetOwner", Type.EmptyTypes);
+            var assignOwner = AccessTools.Method(animalModelType, "AssignPetOwner");
+            if (string.IsNullOrWhiteSpace(petOwnerId))
+            {
+                resetOwner?.Invoke(animal, null);
+            }
+            else if (assignOwner != null && TryFindReplicationAgentOwnerByEntityId(petOwnerId, out var owner, out _) && owner != null)
+            {
+                assignOwner.Invoke(animal, new[] { owner });
+            }
+
+            var ropeTo = AccessTools.Method(animalModelType, "RopeTo");
+            if (ropeTo != null)
+            {
+                object? ropeTarget = null;
+                if (!string.IsNullOrWhiteSpace(ropeTargetId))
+                {
+                    TryFindReplicationAgentOwnerByEntityId(ropeTargetId, out ropeTarget, out _);
+                }
+
+                if (string.IsNullOrWhiteSpace(ropeTargetId) || ropeTarget != null)
+                {
+                    ropeTo.Invoke(animal, new[] { ropeTarget, (object)false });
+                }
+            }
+
+            var orderGivenFromUi = animalControllerType == null
+                ? null
+                : AccessTools.Method(animalControllerType, "OrderGivenFromAnimalUI", new[] { animalModelType });
+            var uiNotified = false;
+            if (animalController != null && orderGivenFromUi != null)
+            {
+                orderGivenFromUi.Invoke(animalController, new[] { animal });
+                uiNotified = true;
+            }
+
+            var effectiveTrainingAttempts = Convert.ToInt32(
+                AccessTools.Property(animalModelType, "CurrentTrainingAttemptsLeft")?.GetValue(animal, null) ?? -1,
+                CultureInfo.InvariantCulture);
+
+            detail = "ok animal-state entityId=" + entityId
+                + " order=" + order.ToString(CultureInfo.InvariantCulture)
+                + " orderApply=" + orderApply
+                + " animalType=" + animalType.ToString(CultureInfo.InvariantCulture)
+                + " trainingAttempts=" + trainingAttempts.ToString(CultureInfo.InvariantCulture)
+                + " trainingReadback=" + effectiveTrainingAttempts.ToString(CultureInfo.InvariantCulture)
+                + " trainingProgress=" + trainingStatApplyDetail
+                + " hostTrainingMax=" + hostTrainingMax.ToString("R", CultureInfo.InvariantCulture)
+                + " trainingProgressApplied=" + (trainingStatApplied ? "yes" : "no")
+                + " appearance=" + appearanceApplyDetail
+                + " appearanceApplied=" + (appearanceApplied ? "yes" : "no")
+                + " fields=" + fields.ToString(CultureInfo.InvariantCulture)
+                + " owner=" + (string.IsNullOrWhiteSpace(petOwnerId) ? "cleared" : petOwnerId)
+                + " uiNotified=" + (uiNotified ? "yes" : "no");
+            return true;
+        }
+
+        private static bool TryDecodeReplicationOptionalDetailBase64(string token, out string value)
+        {
+            if (string.Equals(token, "_", StringComparison.Ordinal))
+            {
+                value = string.Empty;
+                return true;
+            }
+
+            return TryDecodeReplicationDetailBase64(token, out value);
         }
 
         private static bool TryGetSelectedStockpileObjectId(object selection, out string objectId, out string detail)

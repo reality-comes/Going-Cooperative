@@ -55,10 +55,50 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             if (replicationConfigEnabled)
             {
-                return TryApplyReplicationBuildPlacementAuthoritative(blueprintId, x, y, z, angleY, factionOwnership, out detail);
+                var record = new ReplicationBuildPlacementRecord(
+                    false,
+                    x,
+                    y,
+                    z,
+                    NormalizeReplicationBuildAngle(angleY),
+                    1,
+                    1,
+                    1);
+                return TryApplyReplicationBuildBatchAuthoritative(
+                    blueprintId,
+                    factionOwnership,
+                    new List<ReplicationBuildPlacementRecord> { record },
+                    out detail);
             }
 
             return TryInvokeBuildingPlacementPlaceBlueprint(blueprintId, x, y, z, angleY, out detail);
+        }
+
+        bool IRuntimeCommandActions.ApplyBuildBatch(
+            string blueprintId,
+            string buildingType,
+            string factionOwnership,
+            bool afterLoading,
+            string[] placementRecords,
+            out string detail)
+        {
+            if (!TryParseReplicationBuildPlacementRecords(placementRecords, out var records, out var parseDetail))
+            {
+                detail = parseDetail;
+                return false;
+            }
+
+            if (!replicationConfigEnabled)
+            {
+                detail = "build-batch-requires-replication-runtime";
+                return false;
+            }
+
+            return TryApplyReplicationBuildBatchAuthoritative(
+                blueprintId,
+                factionOwnership,
+                records,
+                out detail);
         }
         bool IRuntimeCommandActions.ApplyCutPlant(int uniqueId, string blueprintId, int x, int y, int z, int worldX, int worldY, int worldZ, out string detail)
         {
@@ -905,7 +945,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool TryResolveReplicationStockpileInstanceByObjectId(string objectId, out object? stockpileInstance, out string detail)
         {
             stockpileInstance = null;
-            var identityParts = (objectId ?? string.Empty).Split('@');
+            var identityParts = (objectId ?? string.Empty).Split(new[] { '@' }, StringSplitOptions.None);
             var expectedId = identityParts[0];
             var hasAnchor = identityParts.Length == 2;
             var expectedAnchor = hasAnchor ? identityParts[1] : string.Empty;

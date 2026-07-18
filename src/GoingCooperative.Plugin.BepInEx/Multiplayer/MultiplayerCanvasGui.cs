@@ -89,6 +89,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 DestroyMultiplayerCanvasGui();
             }
 
+            UpdateMultiplayerSteamRuntime();
             EnsureMultiplayerCanvasGui();
             EnsureMultiplayerCanvasEventSystem();
             UpdateMultiplayerSaveWorkflow();
@@ -132,6 +133,12 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void EnsureMultiplayerCanvasGui()
         {
+            if (replicationConfigUiV2)
+            {
+                EnsureMultiplayerCanvasGuiV2();
+                return;
+            }
+
             if (multiplayerCanvasRoot != null)
             {
                 return;
@@ -289,6 +296,12 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void ShowMultiplayerCanvasPage(MultiplayerMenuPage page)
         {
+            if (replicationConfigUiV2)
+            {
+                ShowMultiplayerCanvasPageV2(page);
+                return;
+            }
+
             if (multiplayerCanvasContent == null)
             {
                 return;
@@ -743,6 +756,12 @@ namespace GoingCooperative.Plugin.BepInEx
             multiplayerCanvasStatusValuesText = null;
             multiplayerCanvasLauncherButton = null;
             multiplayerCanvasHudStatusText = null;
+            multiplayerEventPresentationPanel = null;
+            multiplayerEventPresentationKey = string.Empty;
+            multiplayerEventWarningPanel = null;
+            multiplayerEventWarningKey = string.Empty;
+            v2Window = null;
+            v2TabBackgrounds.Clear();
         }
 
         private string BuildMultiplayerCanvasStatusValues()

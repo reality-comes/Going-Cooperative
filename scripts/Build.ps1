@@ -35,6 +35,7 @@ $references = @(
     (Join-Path $managed "UnityEngine.UIModule.dll"),
     (Join-Path $managed "UnityEngine.UI.dll"),
     (Join-Path $managed "Unity.TextMeshPro.dll"),
+    (Join-Path $managed "com.rlabrecque.steamworks.net.dll"),
     (Join-Path $managed "Assembly-CSharp.dll")
 )
 

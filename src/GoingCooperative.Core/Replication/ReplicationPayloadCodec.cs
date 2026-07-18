@@ -7,7 +7,10 @@ namespace GoingCooperative.Core.Replication
 {
     public static class ReplicationPayloadCodec
     {
-        public const string ProtocolVersion = "GCOOP-REPL-1";
+        // Building snapshot scheduling changed in REPL-2. Keep this a hard wire
+        // compatibility boundary: an older peer can otherwise accept a session yet
+        // disagree about when authoritative building state is allowed to replay.
+        public const string ProtocolVersion = "GCOOP-REPL-2";
 
         public static TransportEnvelope ForHello(string senderId, ReplicationHello hello)
         {

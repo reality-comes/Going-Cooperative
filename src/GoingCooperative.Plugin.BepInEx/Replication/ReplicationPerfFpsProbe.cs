@@ -171,6 +171,16 @@ namespace GoingCooperative.Plugin.BepInEx
                 + worldDeltasApplied.ToString(CultureInfo.InvariantCulture)
                 + " worldDeltaRetries="
                 + worldDeltaRetries.ToString(CultureInfo.InvariantCulture)
+                + " buildingSnapshotCollectMs="
+                + replicationBuildingStateSnapshotLastCollectionMs.ToString("0.###", CultureInfo.InvariantCulture)
+                + " buildingSnapshotQueueMs="
+                + replicationBuildingStateSnapshotLastQueueMs.ToString("0.###", CultureInfo.InvariantCulture)
+                + " buildingSnapshotDeferred="
+                + replicationBuildingStateSnapshotChangeDeferred
+                + " buildingSnapshotDeferredChanges="
+                + replicationBuildingStateSnapshotDeferredChangeCount.ToString(CultureInfo.InvariantCulture)
+                + " "
+                + FormatReplicationBuildingLifecycleV2Status()
                 + " worldDeltasCoalesced="
                 + worldDeltasCoalesced.ToString(CultureInfo.InvariantCulture)
                 + " worldDeltaApplyBudgetStops="

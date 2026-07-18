@@ -13,6 +13,12 @@ namespace GoingCooperative.Core
         public const string SetSpeedNormalAction = "SetSpeedNormal";
         public const string DigVoxelAction = "DigVoxel";
         public const string PlaceBlueprintAction = "PlaceBlueprint";
+        public const string PlaceBlueprintBatchAction = "PlaceBlueprintBatch";
+        // A BuildBatch is base64-wrapped once by the command codec and a second time
+        // by the transport envelope. The matching result manifest adds another
+        // wrapping layer plus IDs/accepted bits. Keep the semantic payload bounded so
+        // both directions remain below the transport's 512-chunk receive ceiling.
+        public const int BuildBatchPayloadMaxUtf8Bytes = 131072;
         public const string CutPlantAction = "CutPlant";
         public const string RegionOrderAction = "RegionOrder";
         public const string EquipOrderAction = "EquipOrder";
@@ -36,6 +42,65 @@ namespace GoingCooperative.Core
         public const string CombatPresentationEndReasonCancelled = "cancelled";
         public const string CombatPresentationEndReasonStreamEnded = "stream-ended";
         public const string CombatPresentationEndReasonWatchdog = "watchdog";
+        public const string GameEventOptionChosenAction = "GameEventOptionChosen";
+
+        public static string CreateGameEventOptionChosenPayload(
+            long epoch,
+            string eventId,
+            long eventRevision,
+            string dialogId,
+            int dialogIndex,
+            int optionIndex,
+            string requestId)
+        {
+            return "{\"action\":\"" + GameEventOptionChosenAction
+                + "\",\"epoch\":" + epoch.ToString(CultureInfo.InvariantCulture)
+                + ",\"eventId\":\"" + EscapeJsonString(eventId)
+                + "\",\"eventRevision\":" + eventRevision.ToString(CultureInfo.InvariantCulture)
+                + ",\"dialogId\":\"" + EscapeJsonString(dialogId)
+                + "\",\"dialogIndex\":" + dialogIndex.ToString(CultureInfo.InvariantCulture)
+                + ",\"optionIndex\":" + optionIndex.ToString(CultureInfo.InvariantCulture)
+                + ",\"requestId\":\"" + EscapeJsonString(requestId)
+                + "\"}";
+        }
+
+        public static bool TryReadGameEventOptionChosenPayload(
+            string payloadJson,
+            out long epoch,
+            out string eventId,
+            out long eventRevision,
+            out string dialogId,
+            out int dialogIndex,
+            out int optionIndex,
+            out string requestId)
+        {
+            var normalized = Normalize(payloadJson);
+            epoch = -1L;
+            eventId = string.Empty;
+            eventRevision = -1L;
+            dialogId = string.Empty;
+            dialogIndex = -1;
+            optionIndex = -1;
+            requestId = string.Empty;
+            return HasAction(normalized, GameEventOptionChosenAction)
+                && TryReadLongProperty(normalized, "epoch", out epoch)
+                && epoch >= 0L
+                && TryReadStringProperty(normalized, "eventId", out eventId)
+                && !string.IsNullOrWhiteSpace(eventId)
+                && eventId.Length <= 256
+                && TryReadLongProperty(normalized, "eventRevision", out eventRevision)
+                && eventRevision >= 0L
+                && TryReadStringProperty(normalized, "dialogId", out dialogId)
+                && dialogId.Length <= 256
+                && TryReadIntProperty(normalized, "dialogIndex", out dialogIndex)
+                && dialogIndex >= -1
+                && TryReadIntProperty(normalized, "optionIndex", out optionIndex)
+                && optionIndex >= 0
+                && optionIndex <= 31
+                && TryReadStringProperty(normalized, "requestId", out requestId)
+                && !string.IsNullOrWhiteSpace(requestId)
+                && requestId.Length <= 128;
+        }
 
         public static string CreateDraftStatePayload(string entityId, bool drafted, string combatMode)
         {
@@ -458,6 +523,40 @@ namespace GoingCooperative.Core
                 + "}";
         }
 
+        public static string CreateBuildBatchPayload(
+            string blueprintId,
+            string buildingType,
+            string factionOwnership,
+            bool afterLoading,
+            string[] placementRecords,
+            long epoch = -1L)
+        {
+            return "{\"action\":\"" + PlaceBlueprintBatchAction
+                + "\",\"blueprintId\":\"" + EscapeJsonString(blueprintId)
+                + "\",\"buildingType\":\"" + EscapeJsonString(buildingType)
+                + "\",\"faction\":\"" + EscapeJsonString(factionOwnership)
+                + "\",\"afterLoading\":" + (afterLoading ? "true" : "false")
+                + (epoch >= 0L
+                    ? ",\"epoch\":" + epoch.ToString(CultureInfo.InvariantCulture)
+                    : string.Empty)
+                + ",\"placements\":" + CreateJsonStringArray(placementRecords)
+                + "}";
+        }
+
+        public static bool TryReadBuildBatchEpoch(string payloadJson, out long epoch)
+        {
+            epoch = -1L;
+            if (string.IsNullOrWhiteSpace(payloadJson))
+            {
+                return false;
+            }
+
+            var normalized = Normalize(payloadJson);
+            return HasAction(normalized, PlaceBlueprintBatchAction)
+                && TryReadLongProperty(normalized, "epoch", out epoch)
+                && epoch >= 0L;
+        }
+
         public static string CreateCutPlantPayload(int uniqueId, string blueprintId, int x, int y, int z, int worldX, int worldY, int worldZ)
         {
             return "{\"action\":\"" + CutPlantAction + "\",\"uniqueId\":" + uniqueId.ToString(CultureInfo.InvariantCulture)
@@ -607,6 +706,57 @@ namespace GoingCooperative.Core
                 && TryReadStringProperty(normalized, "buildingType", out buildingType)
                 && TryReadStringProperty(normalized, "faction", out factionOwnership)
                 && TryReadBoolProperty(normalized, "afterLoading", out afterLoading);
+        }
+
+        public static bool TryReadBuildBatchPayload(
+            string payloadJson,
+            out string blueprintId,
+            out string buildingType,
+            out string factionOwnership,
+            out bool afterLoading,
+            out string[] placementRecords)
+        {
+            blueprintId = string.Empty;
+            buildingType = string.Empty;
+            factionOwnership = string.Empty;
+            afterLoading = false;
+            placementRecords = Array.Empty<string>();
+
+            if (string.IsNullOrWhiteSpace(payloadJson)
+                || Encoding.UTF8.GetByteCount(payloadJson) > BuildBatchPayloadMaxUtf8Bytes)
+            {
+                return false;
+            }
+
+            var normalized = Normalize(payloadJson);
+            if (!HasAction(normalized, PlaceBlueprintBatchAction)
+                || !TryReadStringProperty(normalized, "blueprintId", out blueprintId)
+                || string.IsNullOrWhiteSpace(blueprintId)
+                || blueprintId.Length > 256
+                || !TryReadStringProperty(normalized, "buildingType", out buildingType)
+                || buildingType.Length > 128
+                || !TryReadStringProperty(normalized, "faction", out factionOwnership)
+                || string.IsNullOrWhiteSpace(factionOwnership)
+                || factionOwnership.Length > 128
+                || !TryReadBoolProperty(normalized, "afterLoading", out afterLoading)
+                || !TryReadStringArrayProperty(normalized, "placements", out placementRecords)
+                || placementRecords.Length == 0
+                || placementRecords.Length > 512)
+            {
+                placementRecords = Array.Empty<string>();
+                return false;
+            }
+
+            for (var i = 0; i < placementRecords.Length; i++)
+            {
+                if (string.IsNullOrWhiteSpace(placementRecords[i]) || placementRecords[i].Length > 16384)
+                {
+                    placementRecords = Array.Empty<string>();
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         public static bool TryReadCutPlantPayload(

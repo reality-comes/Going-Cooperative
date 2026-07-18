@@ -41,6 +41,188 @@ internal static class CorePolicyTests
         Equal(LockstepCommandPayloads.NormalSpeedIndex, normalSpeedIndex, "normal speed index");
         Equal(LockstepCommandPayloads.SetSpeedNormalAction, normalSpeedAction, "normal speed action");
 
+        var buildBatchRecords = new[]
+        {
+            "N,10,5,-4,90",
+            "N,11,5,-4,90",
+            "R,20,7,30,180,4,2,8;20,7,30;21,7,30"
+        };
+        var buildBatch = LockstepCommandPayloads.CreateBuildBatchPayload(
+            "wood_floor\"variant",
+            "Floor",
+            "Player",
+            false,
+            buildBatchRecords);
+        Equal(true, LockstepCommandPayloads.TryReadBuildBatchPayload(
+            buildBatch,
+            out var buildBatchBlueprint,
+            out var buildBatchType,
+            out var buildBatchFaction,
+            out var buildBatchAfterLoading,
+            out var parsedBuildBatchRecords), "build batch payload parses");
+        Equal("wood_floor\"variant", buildBatchBlueprint, "build batch blueprint escaping");
+        Equal("Floor", buildBatchType, "build batch type");
+        Equal("Player", buildBatchFaction, "build batch faction");
+        Equal(false, buildBatchAfterLoading, "build batch after-loading");
+        Equal(buildBatchRecords.Length, parsedBuildBatchRecords.Length, "build batch record count");
+        Equal(buildBatchRecords[2], parsedBuildBatchRecords[2], "build batch roof topology roundtrip");
+        var epochBuildBatch = LockstepCommandPayloads.CreateBuildBatchPayload(
+            "wood_floor",
+            "Floor",
+            "Player",
+            false,
+            buildBatchRecords,
+            7L);
+        Equal(true, LockstepCommandPayloads.TryReadBuildBatchEpoch(epochBuildBatch, out var buildBatchEpoch), "build batch epoch parses");
+        Equal(7L, buildBatchEpoch, "build batch epoch roundtrip");
+        Equal(false, LockstepCommandPayloads.TryReadBuildBatchEpoch(buildBatch, out _), "legacy build batch has no epoch");
+        Equal(false, LockstepCommandPayloads.TryReadBuildBatchPayload(
+            LockstepCommandPayloads.CreateBuildBatchPayload("wood_floor", "Floor", "Player", false, Array.Empty<string>()),
+            out _, out _, out _, out _, out _), "build batch rejects empty placements");
+        Equal(false, LockstepCommandPayloads.TryReadBuildBatchPayload(
+            LockstepCommandPayloads.CreateBuildBatchPayload("wood_floor", "Floor", "Player", false, new string[513]),
+            out _, out _, out _, out _, out _), "build batch rejects placement over cap");
+        Equal(false, LockstepCommandPayloads.TryReadBuildBatchPayload(
+            buildBatch.Replace("PlaceBlueprintBatch", "PlaceBlueprint"),
+            out _, out _, out _, out _, out _), "build batch rejects legacy action");
+        var oversizedBuildRecords = new string[9];
+        for (var i = 0; i < oversizedBuildRecords.Length; i++)
+        {
+            oversizedBuildRecords[i] = new string('1', 16384);
+        }
+        Equal(false, LockstepCommandPayloads.TryReadBuildBatchPayload(
+            LockstepCommandPayloads.CreateBuildBatchPayload(
+                "wood_floor",
+                "Floor",
+                "Player",
+                false,
+                oversizedBuildRecords),
+            out _, out _, out _, out _, out _), "build batch rejects payload beyond bidirectional chunk budget");
+
+        Equal(false, ReplicationOrderingPolicy.ShouldReplaceQueuedAbsoluteState(102, 101), "absolute-state coalescing keeps newer queued packet");
+        Equal(true, ReplicationOrderingPolicy.ShouldReplaceQueuedAbsoluteState(102, 103), "absolute-state coalescing accepts newer packet");
+        Equal(false, ReplicationOrderingPolicy.IsStaleAppliedAbsoluteState(-1, 1), "absolute-state high-water accepts first packet");
+        Equal(true, ReplicationOrderingPolicy.IsStaleAppliedAbsoluteState(102, 101), "absolute-state high-water rejects delayed older packet");
+        Equal(true, ReplicationOrderingPolicy.IsStaleAppliedAbsoluteState(102, 102), "absolute-state high-water rejects repeated packet");
+        Equal(false, ReplicationOrderingPolicy.IsStaleAppliedAbsoluteState(102, 103), "absolute-state high-water accepts newer packet");
+        Equal(103L, ReplicationOrderingPolicy.AdvanceAppliedAbsoluteState(102, 103), "absolute-state high-water advances");
+        Equal(103L, ReplicationOrderingPolicy.AdvanceAppliedAbsoluteState(103, 102), "absolute-state high-water never regresses");
+        Equal(false, ReplicationOrderingPolicy.IsStaleSnapshot(-1, 1), "snapshot high-water accepts first checkpoint");
+        Equal(true, ReplicationOrderingPolicy.IsStaleSnapshot(5, 4), "snapshot high-water rejects older checkpoint");
+        Equal(false, ReplicationOrderingPolicy.IsStaleSnapshot(5, 5), "snapshot high-water accepts current checkpoint rows");
+        Equal(false, ReplicationOrderingPolicy.IsStaleSnapshot(5, 6), "snapshot high-water accepts newer checkpoint");
+        Equal(6L, ReplicationOrderingPolicy.AdvanceSnapshot(5, 6), "snapshot high-water advances");
+        Equal(6L, ReplicationOrderingPolicy.AdvanceSnapshot(6, 5), "snapshot high-water never regresses");
+        Equal(false, ReplicationOrderingPolicy.IsSnapshotComplete(false, 2, 2), "snapshot rows before End remain pending");
+        Equal(false, ReplicationOrderingPolicy.IsSnapshotComplete(true, 2, 1), "snapshot End before final row remains pending");
+        Equal(true, ReplicationOrderingPolicy.IsSnapshotComplete(true, 2, 2), "snapshot final row after End completes checkpoint");
+        Equal(false, ReplicationOrderingPolicy.IsSnapshotComplete(true, 2, 3), "snapshot over-count does not falsely complete");
+        Equal(false, ReplicationOrderingPolicy.ShouldAcceptBuildBatch(1, 128), "build batch 1/128 partial commit is rejected");
+        Equal(false, ReplicationOrderingPolicy.ShouldAcceptBuildBatch(127, 128), "build batch 127/128 partial commit is rejected");
+        Equal(true, ReplicationOrderingPolicy.ShouldAcceptBuildBatch(128, 128), "build batch 128/128 exact commits remain accepted after a post-commit throw");
+        Equal(false, ReplicationOrderingPolicy.ShouldAcceptBuildBatch(0, 0), "build batch empty request is rejected");
+        Equal(false, ReplicationOrderingPolicy.ShouldLatchBuildBatchRecovery(0, 128, true, true), "proven full rollback does not latch recovery");
+        Equal(true, ReplicationOrderingPolicy.ShouldLatchBuildBatchRecovery(1, 128, true, false), "partial rollback failure latches full-save recovery");
+        Equal(false, ReplicationOrderingPolicy.ShouldLatchBuildBatchRecovery(128, 128, false, false), "fully committed post-commit throw does not become rollback recovery");
+        Equal(false, ReplicationOrderingPolicy.ShouldEscalateBuildBatchReplay(7, 8), "build batch replay remains bounded below failure cap");
+        Equal(true, ReplicationOrderingPolicy.ShouldEscalateBuildBatchReplay(8, 8), "build batch replay escalates at failure cap");
+        Equal(false, ReplicationOrderingPolicy.ShouldEscalateBuildBatchReplay(8, 0), "build batch replay rejects invalid failure cap");
+        Equal(false, ReplicationOrderingPolicy.IsValidBuildRoofPositionCount(0, 512), "roof topology rejects empty positions");
+        Equal(true, ReplicationOrderingPolicy.IsValidBuildRoofPositionCount(1, 512), "roof topology accepts one committed position");
+        Equal(true, ReplicationOrderingPolicy.IsValidBuildRoofPositionCount(512, 512), "roof topology accepts exact cap");
+        Equal(false, ReplicationOrderingPolicy.IsValidBuildRoofPositionCount(513, 512), "roof topology rejects over cap");
+        Equal(0, ReplicationOrderingPolicy.GetBuildRepairDependencyRank(true, false), "building repair sends exact supports before dependent roofs");
+        Equal(1, ReplicationOrderingPolicy.GetBuildRepairDependencyRank(true, true), "building repair sends exact roofs after supports");
+        Equal(2, ReplicationOrderingPolicy.GetBuildRepairDependencyRank(false, false), "building repair sends unreplayable diagnostics last");
+        Equal(256, ReplicationOrderingPolicy.GetBoundedSnapshotPageCount(600, 0, 256), "building repair first page is bounded");
+        Equal(256, ReplicationOrderingPolicy.GetBoundedSnapshotPageCount(600, 256, 256), "building repair middle page is bounded");
+        Equal(88, ReplicationOrderingPolicy.GetBoundedSnapshotPageCount(600, 512, 256), "building repair final page covers remainder");
+        Equal(256, ReplicationOrderingPolicy.AdvanceSnapshotPageOffset(600, 0, 256), "building repair advances first page");
+        Equal(600, ReplicationOrderingPolicy.AdvanceSnapshotPageOffset(600, 512, 88), "building repair reaches total count");
+        Equal(false, ReplicationOrderingPolicy.IsFinalSnapshotPage(600, 256, 256), "building repair middle page is not final");
+        Equal(true, ReplicationOrderingPolicy.IsFinalSnapshotPage(600, 512, 88), "building repair final page is terminal");
+        Equal(true, ReplicationOrderingPolicy.ShouldPruneCheckpointEvent(false, 101, 102), "checkpoint prunes event older than Begin boundary");
+        Equal(false, ReplicationOrderingPolicy.ShouldPruneCheckpointEvent(false, 103, 102), "checkpoint preserves event newer than Begin boundary");
+        Equal(false, ReplicationOrderingPolicy.ShouldPruneCheckpointEvent(true, 101, 102), "checkpoint preserves seen event");
+        Equal(true, ReplicationOrderingPolicy.IsValidGameTime(10, 0.5f, 2f), "game time accepts finite calendar state");
+        Equal(false, ReplicationOrderingPolicy.IsValidGameTime(-1, 0.5f, 2f), "game time rejects negative minutes");
+        Equal(false, ReplicationOrderingPolicy.IsValidGameTime(10, float.NaN, 2f), "game time rejects NaN fraction");
+        Equal(false, ReplicationOrderingPolicy.IsValidGameTime(10, 1f, 2f), "game time rejects out-of-range fraction");
+        Equal(false, ReplicationOrderingPolicy.IsValidGameTime(10, 0.5f, float.PositiveInfinity), "game time rejects infinite diagnostic time");
+
+        var chunkSource = new TransportEnvelope(
+            TransportMessageKind.ReplicationIntent,
+            42,
+            "client",
+            new string('x', 2400));
+        var chunks = TransportChunkCodec.CreateChunks(chunkSource, "chunk-test", 100);
+        var reassembler = new TransportChunkReassembler();
+        TransportEnvelope? reassembled = null;
+        for (var i = chunks.Count - 1; i >= 0; i--)
+        {
+            Equal(true, reassembler.TryAddChunk(chunks[i], out var candidate, out _), "chunk reassembly accepts reverse-order part " + i.ToString(CultureInfo.InvariantCulture));
+            if (candidate != null) reassembled = candidate;
+        }
+        Equal(true, reassembled != null, "chunk reassembly completes");
+        Equal(chunkSource.Payload, reassembled?.Payload, "chunk reassembly payload roundtrip");
+        var oversizedParts = chunks[0].Payload.Split(new[] { '|' }, StringSplitOptions.None);
+        oversizedParts[3] = "513";
+        var oversizedChunk = new TransportEnvelope(
+            TransportMessageKind.Chunk,
+            chunks[0].Tick,
+            chunks[0].SenderId,
+            string.Join("|", oversizedParts));
+        Equal(false, reassembler.TryAddChunk(oversizedChunk, out _, out _), "chunk reassembly rejects excessive chunk count");
+        var oversizedChunkCreationRejected = false;
+        try
+        {
+            TransportChunkCodec.CreateChunks(
+                new TransportEnvelope(
+                    TransportMessageKind.ReplicationIntent,
+                    43,
+                    "client",
+                    new string('x', 40000)),
+                "chunk-create-over-cap",
+                100);
+        }
+        catch (InvalidOperationException)
+        {
+            oversizedChunkCreationRejected = true;
+        }
+        Equal(true, oversizedChunkCreationRejected, "chunk sender rejects envelope receiver cannot reassemble");
+
+        var eventChoice = LockstepCommandPayloads.CreateGameEventOptionChosenPayload(
+            7,
+            "session:event:\"one\n",
+            12,
+            "dialog branch \"A\"",
+            3,
+            2,
+            "request:abc-123");
+        Equal(true, LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(
+            eventChoice,
+            out var eventEpoch,
+            out var eventId,
+            out var eventRevision,
+            out var eventDialogId,
+            out var eventDialogIndex,
+            out var eventOptionIndex,
+            out var eventRequestId), "event choice payload parses");
+        Equal(7L, eventEpoch, "event choice epoch");
+        Equal("session:event:\"one\n", eventId, "event choice event identity escaping");
+        Equal(12L, eventRevision, "event choice revision");
+        Equal("dialog branch \"A\"", eventDialogId, "event choice dialog identity escaping");
+        Equal(3, eventDialogIndex, "event choice dialog index");
+        Equal(2, eventOptionIndex, "event choice option index");
+        Equal("request:abc-123", eventRequestId, "event choice request identity");
+        Equal(false, LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(eventChoice.Replace("\"epoch\":7", "\"epoch\":-1"), out _, out _, out _, out _, out _, out _, out _), "event choice rejects negative epoch");
+        Equal(false, LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(eventChoice.Replace("\"eventRevision\":12", "\"eventRevision\":-1"), out _, out _, out _, out _, out _, out _, out _), "event choice rejects negative revision");
+        Equal(false, LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(eventChoice.Replace("\"optionIndex\":2", "\"optionIndex\":32"), out _, out _, out _, out _, out _, out _, out _), "event choice rejects option outside protocol bound");
+        Equal(false, LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(eventChoice.Replace("GameEventOptionChosen", "CombatAttack"), out _, out _, out _, out _, out _, out _, out _), "event choice rejects other action");
+        Equal(false, LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(LockstepCommandPayloads.CreateGameEventOptionChosenPayload(0, new string('e', 257), 0, string.Empty, -1, 0, "request"), out _, out _, out _, out _, out _, out _, out _), "event choice rejects oversized event identity");
+        Equal(false, LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(LockstepCommandPayloads.CreateGameEventOptionChosenPayload(0, "event", 0, new string('d', 257), -1, 0, "request"), out _, out _, out _, out _, out _, out _, out _), "event choice rejects oversized dialog identity");
+        Equal(false, LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(LockstepCommandPayloads.CreateGameEventOptionChosenPayload(0, "event", 0, string.Empty, -1, 0, new string('r', 129)), out _, out _, out _, out _, out _, out _, out _), "event choice rejects oversized request identity");
+
         Equal(5, CoordinateResolverPolicy.ResolveY(CoordinateTargetKind.Building, true, 5, 15), "building uses map Y");
         Equal(15, CoordinateResolverPolicy.ResolveY(CoordinateTargetKind.MapResource, true, 5, 15), "map resource uses selection Y");
         Equal(15, CoordinateResolverPolicy.ResolveY(CoordinateTargetKind.ResourcePile, true, 5, 15), "pile contextual action uses selection Y");
@@ -68,6 +250,18 @@ internal static class CorePolicyTests
         Equal("uid:42", huntTarget, "hunt target identity");
         Equal("Hunt", huntOrder, "hunt order name");
         Equal(1, huntValue, "hunt native order value");
+        var tame = LockstepCommandPayloads.CreateManagementPolicyPayload("AnimalOrder", "uid:43", "Tame", 0, 2, true);
+        Equal(true, LockstepCommandPayloads.TryReadManagementPolicyPayload(tame, out var tamePolicy, out var tameTarget, out var tameOrder, out _, out var tameValue, out _), "tame payload parses");
+        Equal("AnimalOrder", tamePolicy, "tame policy kind");
+        Equal("uid:43", tameTarget, "tame target identity");
+        Equal("Tame", tameOrder, "tame order name");
+        Equal(2, tameValue, "tame native order value");
+        var slaughter = LockstepCommandPayloads.CreateManagementPolicyPayload("AnimalOrder", "uid:44", "Slaughter", 0, 4, true);
+        Equal(true, LockstepCommandPayloads.TryReadManagementPolicyPayload(slaughter, out var slaughterPolicy, out var slaughterTarget, out var slaughterOrder, out _, out var slaughterValue, out _), "slaughter payload parses");
+        Equal("AnimalOrder", slaughterPolicy, "slaughter policy kind");
+        Equal("uid:44", slaughterTarget, "slaughter target identity");
+        Equal("Slaughter", slaughterOrder, "slaughter order name");
+        Equal(4, slaughterValue, "slaughter native order value");
         Equal("uid:-3", targetId, "management target");
         Equal(7, policyIndex, "management index");
         Equal(2, policyValue, "management value");
@@ -274,6 +468,7 @@ internal static class CorePolicyTests
 
         Equal(false, LockstepCommandPayloads.TryReadCombatOutcomePayload("{\"action\":\"CombatOutcome\",\"outcomeId\":\"missing-fields\"}", out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _), "combat outcome rejects incomplete payload");
 
+        failures += BuildingReplicationV2PolicyTests.Run();
         Console.WriteLine(failures == 0 ? "PASS CorePolicyTests" : "FAILED " + failures);
         return failures == 0 ? 0 : 1;
     }
