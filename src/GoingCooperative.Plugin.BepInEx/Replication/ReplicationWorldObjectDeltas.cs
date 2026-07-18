@@ -2545,7 +2545,8 @@ namespace GoingCooperative.Plugin.BepInEx
                             delta.DeltaKind,
                             ReplicationBuildingRecoveryRequiredV2DeltaKind,
                             StringComparison.Ordinal)
-                        || IsReplicationWorkerScheduleStateDelta(delta))
+                        || IsReplicationWorkerScheduleStateDelta(delta)
+                        || IsReplicationWorkerJobsStateDelta(delta))
                     {
                         // Lifecycle rows are absolute, revisioned state. Once a newer
                         // row exists for a building, retaining/retrying every older row
@@ -3412,6 +3413,19 @@ namespace GoingCooperative.Plugin.BepInEx
                     + scheduleTargetId;
             }
 
+            if (IsReplicationWorkerJobsStateDelta(delta)
+                && LockstepCommandPayloads.TryReadWorkerJobsStatePayload(
+                    delta.Detail,
+                    out var jobsTargetId,
+                    out _,
+                    out _,
+                    out _))
+            {
+                return ManagementDeltaKind
+                    + "|policy=WorkerJobsState|target="
+                    + jobsTargetId;
+            }
+
             if (string.Equals(
                     delta.DeltaKind,
                     ReplicationBuildingRecoveryRequiredV2DeltaKind,
@@ -3445,6 +3459,18 @@ namespace GoingCooperative.Plugin.BepInEx
             return string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal)
                 && LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(
                     delta.Detail,
+                    out _,
+                    out _);
+        }
+
+        private static bool IsReplicationWorkerJobsStateDelta(
+            ReplicationWorldObjectDelta delta)
+        {
+            return string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal)
+                && LockstepCommandPayloads.TryReadWorkerJobsStatePayload(
+                    delta.Detail,
+                    out _,
+                    out _,
                     out _,
                     out _);
         }
@@ -3494,6 +3520,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 && schedulePending.SendCount >= ReplicationWorldObjectDeltaMaxSends)
             {
                 return ReplicationWorkerScheduleStateDurableRetrySeconds;
+            }
+
+            if (IsReplicationWorkerJobsStateDelta(delta)
+                && replicationPendingWorldObjectDeltas.TryGetValue(delta.Sequence, out var jobsPending)
+                && jobsPending.SendCount >= ReplicationWorldObjectDeltaMaxSends)
+            {
+                return ReplicationWorkerJobsStateDurableRetrySeconds;
             }
 
             return ReplicationWorldObjectDeltaRetrySeconds;
@@ -3572,7 +3605,9 @@ namespace GoingCooperative.Plugin.BepInEx
                 }
 
                 var durableWorkerScheduleState = IsReplicationWorkerScheduleStateDelta(delta);
-                var durableTransaction = durableWorkerScheduleState || string.Equals(
+                var durableWorkerJobsState = IsReplicationWorkerJobsStateDelta(delta);
+                var durableManagementState = durableWorkerScheduleState || durableWorkerJobsState;
+                var durableTransaction = durableManagementState || string.Equals(
                         delta.DeltaKind,
                         ReplicationBuildingBlueprintBatchPlacedDeltaKind,
                         StringComparison.Ordinal)
@@ -3586,7 +3621,7 @@ namespace GoingCooperative.Plugin.BepInEx
                         StringComparison.Ordinal);
                 if (durableTransaction)
                 {
-                    if (durableWorkerScheduleState)
+                    if (durableManagementState)
                     {
                         // This is a complete, coalesced row. Retain at most one per
                         // worker and retry slowly until the client proves application.
@@ -4099,6 +4134,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 || string.Equals(delta.DeltaKind, ReplicationBuildingProgressV2DeltaKind, StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, ReplicationBuildingRepairV2DeltaKind, StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, ReplicationBuildingRecoveryRequiredV2DeltaKind, StringComparison.Ordinal)
+                || IsReplicationWorkerScheduleStateDelta(delta)
+                || IsReplicationWorkerJobsStateDelta(delta)
                 || IsReplicationEventDeltaKind(delta.DeltaKind);
         }
 
@@ -15681,6 +15718,21 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             if (string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal)
+                && LockstepCommandPayloads.TryReadWorkerJobsStatePayload(
+                    delta.Detail,
+                    out var jobsTargetId,
+                    out _,
+                    out _,
+                    out _))
+            {
+                // Jobs updates are complete authoritative rows, sharing one ordered
+                // and coalesced lane per worker regardless of which cells changed.
+                return ManagementDeltaKind
+                    + "|policy=WorkerJobsState|target="
+                    + jobsTargetId;
+            }
+
+            if (string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal)
                 && LockstepCommandPayloads.TryReadManagementPolicyPayload(
                     delta.Detail,
                     out var policy,
@@ -15974,6 +16026,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private const float ReplicationBuildingStateSnapshotRetrySeconds = 3.0f;
         private const float ReplicationBuildingDurableRetrySeconds = 5.0f;
         private const float ReplicationWorkerScheduleStateDurableRetrySeconds = 5.0f;
+        private const float ReplicationWorkerJobsStateDurableRetrySeconds = 5.0f;
         private const int ReplicationWorldObjectDeltaMaxSends = 5;
         private const int ReplicationBuildBatchWorldObjectDeltaMaxSends = 20;
         private const int ReplicationClientAppliedWorldObjectDeltaSequenceRetention = 65536;

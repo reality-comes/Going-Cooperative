@@ -267,6 +267,62 @@ internal static class CorePolicyTests
         Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(LockstepCommandPayloads.CreateWorkerScheduleStatePayload("uid:7", Array.Empty<int>()), out _, out _), "worker schedule state rejects empty hours");
         Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(LockstepCommandPayloads.CreateWorkerScheduleStatePayload("uid:7", new int[LockstepCommandPayloads.MaximumWorkerScheduleHours + 1]), out _, out _), "worker schedule state rejects excessive hours");
         Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(scheduleState.Replace("0,0,1", "0,nope,1"), out _, out _), "worker schedule state rejects malformed hour value");
+        var workerJobTypes = new[] { 1, 7, 42 };
+        var workerJobPriorities = new[]
+        {
+            LockstepCommandPayloads.MinimumWorkerJobPriority,
+            5,
+            LockstepCommandPayloads.MaximumWorkerJobPriority
+        };
+        var workerJobActive = new[] { true, false, true };
+        var workerJobsUpdate = LockstepCommandPayloads.CreateWorkerJobsUpdatePayload(
+            "uid:jobs-7",
+            workerJobTypes,
+            workerJobPriorities,
+            workerJobActive);
+        Equal(true, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(workerJobsUpdate, out var workerJobsUpdateTarget, out var updatedJobTypes, out var updatedJobPriorities, out var updatedJobsActive), "worker jobs update parses");
+        Equal("uid:jobs-7", workerJobsUpdateTarget, "worker jobs update target");
+        Equal(3, updatedJobTypes.Length, "worker jobs update count");
+        Equal(7, updatedJobTypes[1], "worker jobs update type roundtrip");
+        Equal(5, updatedJobPriorities[1], "worker jobs update priority roundtrip");
+        Equal(false, updatedJobsActive[1], "worker jobs update active roundtrip");
+        Equal(LockstepCommandPayloads.MinimumWorkerJobPriority, updatedJobPriorities[0], "worker jobs update minimum priority roundtrip");
+        Equal(LockstepCommandPayloads.MaximumWorkerJobPriority, updatedJobPriorities[2], "worker jobs update maximum priority roundtrip");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(LockstepCommandPayloads.CreateWorkerJobsUpdatePayload("uid:7", new[] { 1 }, Array.Empty<int>(), new[] { true }), out _, out _, out _, out _), "worker jobs update rejects mismatched arrays");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(workerJobsUpdate.Replace("7:5:0", "1:5:0"), out _, out _, out _, out _), "worker jobs update rejects duplicate job types");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(workerJobsUpdate.Replace("7:5:0", "0:5:0"), out _, out _, out _, out _), "worker jobs update rejects nonpositive job type");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(workerJobsUpdate.Replace("7:5:0", "job:5:0"), out _, out _, out _, out _), "worker jobs update rejects malformed job type");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(workerJobsUpdate.Replace("7:5:0", "7:nope:0"), out _, out _, out _, out _), "worker jobs update rejects malformed priority");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(workerJobsUpdate.Replace("7:5:0", "7:5:true"), out _, out _, out _, out _), "worker jobs update rejects malformed active value");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(LockstepCommandPayloads.CreateWorkerJobsUpdatePayload(string.Empty, workerJobTypes, workerJobPriorities, workerJobActive), out _, out _, out _, out _), "worker jobs update rejects empty target");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(LockstepCommandPayloads.CreateWorkerJobsUpdatePayload("uid:7", Array.Empty<int>(), Array.Empty<int>(), Array.Empty<bool>()), out _, out _, out _, out _), "worker jobs update rejects empty jobs");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(LockstepCommandPayloads.CreateWorkerJobsUpdatePayload("uid:7", new[] { 1 }, new[] { LockstepCommandPayloads.MinimumWorkerJobPriority - 1 }, new[] { true }), out _, out _, out _, out _), "worker jobs update rejects priority below bound");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(LockstepCommandPayloads.CreateWorkerJobsUpdatePayload("uid:7", new[] { 1 }, new[] { LockstepCommandPayloads.MaximumWorkerJobPriority + 1 }, new[] { true }), out _, out _, out _, out _), "worker jobs update rejects priority above bound");
+        var excessiveWorkerJobTypes = new int[LockstepCommandPayloads.MaximumWorkerJobs + 1];
+        var excessiveWorkerJobPriorities = new int[excessiveWorkerJobTypes.Length];
+        var excessiveWorkerJobsActive = new bool[excessiveWorkerJobTypes.Length];
+        for (var i = 0; i < excessiveWorkerJobTypes.Length; i++)
+        {
+            excessiveWorkerJobTypes[i] = i + 1;
+            excessiveWorkerJobsActive[i] = i % 2 == 0;
+        }
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(LockstepCommandPayloads.CreateWorkerJobsUpdatePayload("uid:7", excessiveWorkerJobTypes, excessiveWorkerJobPriorities, excessiveWorkerJobsActive), out _, out _, out _, out _), "worker jobs update rejects excessive jobs");
+        var workerJobsState = LockstepCommandPayloads.CreateWorkerJobsStatePayload(
+            "uid:jobs-7",
+            workerJobTypes,
+            workerJobPriorities,
+            workerJobActive);
+        Equal(true, LockstepCommandPayloads.TryReadWorkerJobsStatePayload(workerJobsState, out var workerJobsStateTarget, out var stateJobTypes, out var stateJobPriorities, out var stateJobsActive), "worker jobs state parses");
+        Equal("uid:jobs-7", workerJobsStateTarget, "worker jobs state target");
+        Equal(workerJobTypes.Length, stateJobTypes.Length, "worker jobs state count");
+        Equal(42, stateJobTypes[2], "worker jobs state type roundtrip");
+        Equal(LockstepCommandPayloads.MaximumWorkerJobPriority, stateJobPriorities[2], "worker jobs state priority roundtrip");
+        Equal(true, stateJobsActive[2], "worker jobs state active roundtrip");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsStatePayload(LockstepCommandPayloads.CreateWorkerJobsStatePayload(string.Empty, workerJobTypes, workerJobPriorities, workerJobActive), out _, out _, out _, out _), "worker jobs state rejects empty target");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsStatePayload(LockstepCommandPayloads.CreateWorkerJobsStatePayload("uid:7", Array.Empty<int>(), Array.Empty<int>(), Array.Empty<bool>()), out _, out _, out _, out _), "worker jobs state rejects empty jobs");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsStatePayload(LockstepCommandPayloads.CreateWorkerJobsStatePayload("uid:7", excessiveWorkerJobTypes, excessiveWorkerJobPriorities, excessiveWorkerJobsActive), out _, out _, out _, out _), "worker jobs state rejects excessive jobs");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsStatePayload(workerJobsUpdate, out _, out _, out _, out _), "worker jobs state rejects update action");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(workerJobsState, out _, out _, out _, out _), "worker jobs update rejects state action");
         var hunt = LockstepCommandPayloads.CreateManagementPolicyPayload("AnimalOrder", "uid:42", "Hunt", 0, 1, true);
         Equal(true, LockstepCommandPayloads.TryReadManagementPolicyPayload(hunt, out var huntPolicy, out var huntTarget, out var huntOrder, out _, out var huntValue, out _), "hunt payload parses");
         Equal("AnimalOrder", huntPolicy, "hunt policy kind");

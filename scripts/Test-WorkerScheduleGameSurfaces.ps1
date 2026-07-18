@@ -127,7 +127,7 @@ foreach ($marker in @(
     'ReplicationDeferredPreHelloEnvelopes.Clear();',
     'ignored-incompatible-or-prehello',
     'replicationLastRemoteHelloRealtime = Time.realtimeSinceStartup;',
-    'ReplicationManagementWireVersion = "2"',
+    'ReplicationManagementWireVersion = "3"',
     '"|management="')) {
     if (-not $runtimeSource.Contains($marker)) { throw "Worker Schedule runtime is missing $marker." }
 }

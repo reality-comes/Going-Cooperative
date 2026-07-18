@@ -28,6 +28,11 @@ namespace GoingCooperative.Core
         public const string WorkerScheduleUpdateAction = "WorkerScheduleUpdate";
         public const string WorkerScheduleStateAction = "WorkerScheduleState";
         public const int MaximumWorkerScheduleHours = 48;
+        public const string WorkerJobsUpdateAction = "WorkerJobsUpdate";
+        public const string WorkerJobsStateAction = "WorkerJobsState";
+        public const int MaximumWorkerJobs = 64;
+        public const int MinimumWorkerJobPriority = -100;
+        public const int MaximumWorkerJobPriority = 100;
         public const string WorkerManagePresetAction = "WorkerManagePreset";
         public const string DraftStateAction = "DraftState";
         public const string DraftMoveAction = "DraftMove";
@@ -550,6 +555,154 @@ namespace GoingCooperative.Core
             }
 
             hourTypes = parsed;
+            return true;
+        }
+
+        public static string CreateWorkerJobsUpdatePayload(
+            string targetId,
+            int[] jobTypes,
+            int[] priorities,
+            bool[] active)
+        {
+            return CreateWorkerJobsPayload(
+                WorkerJobsUpdateAction,
+                targetId,
+                jobTypes,
+                priorities,
+                active);
+        }
+
+        public static bool TryReadWorkerJobsUpdatePayload(
+            string payloadJson,
+            out string targetId,
+            out int[] jobTypes,
+            out int[] priorities,
+            out bool[] active)
+        {
+            return TryReadWorkerJobsPayload(
+                payloadJson,
+                WorkerJobsUpdateAction,
+                out targetId,
+                out jobTypes,
+                out priorities,
+                out active);
+        }
+
+        public static string CreateWorkerJobsStatePayload(
+            string targetId,
+            int[] jobTypes,
+            int[] priorities,
+            bool[] active)
+        {
+            return CreateWorkerJobsPayload(
+                WorkerJobsStateAction,
+                targetId,
+                jobTypes,
+                priorities,
+                active);
+        }
+
+        public static bool TryReadWorkerJobsStatePayload(
+            string payloadJson,
+            out string targetId,
+            out int[] jobTypes,
+            out int[] priorities,
+            out bool[] active)
+        {
+            return TryReadWorkerJobsPayload(
+                payloadJson,
+                WorkerJobsStateAction,
+                out targetId,
+                out jobTypes,
+                out priorities,
+                out active);
+        }
+
+        private static string CreateWorkerJobsPayload(
+            string action,
+            string targetId,
+            int[] jobTypes,
+            int[] priorities,
+            bool[] active)
+        {
+            var types = jobTypes ?? Array.Empty<int>();
+            var values = priorities ?? Array.Empty<int>();
+            var enabled = active ?? Array.Empty<bool>();
+            var count = types.Length == values.Length && types.Length == enabled.Length
+                ? types.Length
+                : 0;
+            var jobs = new StringBuilder();
+            for (var i = 0; i < count; i++)
+            {
+                if (i > 0)
+                {
+                    jobs.Append(',');
+                }
+                jobs.Append(types[i].ToString(CultureInfo.InvariantCulture));
+                jobs.Append(':');
+                jobs.Append(values[i].ToString(CultureInfo.InvariantCulture));
+                jobs.Append(':');
+                jobs.Append(enabled[i] ? '1' : '0');
+            }
+
+            return "{\"action\":\"" + action
+                + "\",\"targetId\":\"" + EscapeJsonString(targetId)
+                + "\",\"jobs\":\"" + jobs + "\"}";
+        }
+
+        private static bool TryReadWorkerJobsPayload(
+            string payloadJson,
+            string action,
+            out string targetId,
+            out int[] jobTypes,
+            out int[] priorities,
+            out bool[] active)
+        {
+            var normalized = Normalize(payloadJson);
+            targetId = string.Empty;
+            jobTypes = Array.Empty<int>();
+            priorities = Array.Empty<int>();
+            active = Array.Empty<bool>();
+            if (!HasAction(normalized, action)
+                || !TryReadStringProperty(normalized, "targetId", out targetId)
+                || string.IsNullOrWhiteSpace(targetId)
+                || !TryReadStringProperty(normalized, "jobs", out var encoded)
+                || string.IsNullOrWhiteSpace(encoded))
+            {
+                return false;
+            }
+
+            var parts = encoded.Split(new[] { ',' }, StringSplitOptions.None);
+            if (parts.Length == 0 || parts.Length > MaximumWorkerJobs)
+            {
+                return false;
+            }
+
+            var parsedTypes = new int[parts.Length];
+            var parsedPriorities = new int[parts.Length];
+            var parsedActive = new bool[parts.Length];
+            var seenTypes = new HashSet<int>();
+            for (var i = 0; i < parts.Length; i++)
+            {
+                var fields = parts[i].Split(new[] { ':' }, StringSplitOptions.None);
+                if (fields.Length != 3
+                    || !int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedTypes[i])
+                    || parsedTypes[i] <= 0
+                    || !seenTypes.Add(parsedTypes[i])
+                    || !int.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedPriorities[i])
+                    || parsedPriorities[i] < MinimumWorkerJobPriority
+                    || parsedPriorities[i] > MaximumWorkerJobPriority
+                    || (fields[2] != "0" && fields[2] != "1"))
+                {
+                    return false;
+                }
+
+                parsedActive[i] = fields[2] == "1";
+            }
+
+            jobTypes = parsedTypes;
+            priorities = parsedPriorities;
+            active = parsedActive;
             return true;
         }
 

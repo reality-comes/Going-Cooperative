@@ -118,7 +118,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private const int ReplicationBuildingDurableBackpressureLimit = 16;
         private const int ReplicationDeferredPreHelloEnvelopeLimit = 256;
         private const float ReplicationRemoteHelloFreshSeconds = 3f;
-        private const string ReplicationManagementWireVersion = "2";
+        private const string ReplicationManagementWireVersion = "3";
 
         private void TryStartReplicationRuntime()
         {
@@ -194,6 +194,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
+            // Commit every synchronous Jobs UI gesture to the durable pending lane
+            // before an inbound authoritative row can be applied this frame. That
+            // guarantees state-proof overlay can see and preserve newer local edits.
+            FlushReplicationWorkerJobsChanges();
             PumpReplicationTransport();
             SendReplicationHelloIfDue();
             if (replicationConfigHostMode)
@@ -335,6 +339,7 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationWorkerScheduleAuthoritativeApplyDepth = 0;
             replicationApplyingRemoteManagementCommandSequence = 0L;
             ReplicationHostWorkerScheduleIntentSequenceByHour.Clear();
+            ResetReplicationWorkerJobsRuntimeState();
             replicationLastHostManagementMutationPayload = string.Empty;
             replicationLastHostManagementMutationRealtime = 0f;
             ReplicationRecentRegionOrderMarkerStates.Clear();
@@ -1378,9 +1383,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 replicationLastIntentSummary = "host-duplicate " + FormatRuntimeCommandSummary(command);
                 SendReplicationCommandAck(command, originalResult.Invoked, duplicate: true, detail: originalResult.Detail);
                 ResendReplicationBuildBatchResult(command, originalRecord.BuildBatchCommitManifest);
-                if (IsReplicationWorkerScheduleUpdateCommand(command))
+                if (IsReplicationWorkerScheduleUpdateCommand(command)
+                    || IsReplicationWorkerJobsUpdateCommand(command))
                 {
-                    // A schedule command ACK proves host receipt, not that the
+                    // A durable management ACK proves host receipt, not that the
                     // authoritative full-row correction reached the client. A retry
                     // therefore asks the host to emit that state proof again.
                     SendReplicationManagementStateIfSupported(command, originalResult);
@@ -1504,11 +1510,14 @@ namespace GoingCooperative.Plugin.BepInEx
             var pendingBuildBatch = pendingCommand != null && IsReplicationBuildBatchCommand(pendingCommand.Command);
             var pendingWorkerSchedule = pendingCommand != null
                 && IsReplicationWorkerScheduleUpdateCommand(pendingCommand.Command);
-            if (pendingBuildBatch || pendingWorkerSchedule)
+            var pendingWorkerJobs = pendingCommand != null
+                && IsReplicationWorkerJobsUpdateCommand(pendingCommand.Command);
+            if (pendingBuildBatch || pendingWorkerSchedule || pendingWorkerJobs)
             {
                 // The command ACK is transaction-level receipt state; the durable result
-                // manifest/full schedule state owns canonical truth. Do not discard provisional views on a negative ACK,
-                // or optimistic schedule state, before that authoritative proof arrives.
+                // manifest/full management state owns canonical truth.
+                // Do not discard provisional views on a negative ACK, or optimistic policy state,
+                // before that authoritative proof arrives.
                 pendingCommand!.MarkHostResponded(ack.Accepted, Time.realtimeSinceStartup);
                 if (pendingBuildBatch && ack.Detail.IndexOf(
                     "building-v2-backpressure-recovery-required",

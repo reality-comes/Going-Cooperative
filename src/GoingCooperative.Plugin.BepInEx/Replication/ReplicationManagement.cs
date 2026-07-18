@@ -47,12 +47,7 @@ namespace GoingCooperative.Plugin.BepInEx
             count += PatchProductionRemovalMethod(harmony);
             count += PatchManagementMethodByArity(harmony, "NSMedieval.UI.SelectionExtraStockpile", "OnResourceToggleChangeCallback", 2, nameof(ReplicationStockpileResourcePrefix), nameof(ReplicationStockpilePolicyPostfix));
             count += PatchManagementMethod(harmony, "NSMedieval.UI.SelectionExtraStockpile", "OnPriorityChanged", Type.EmptyTypes, nameof(ReplicationStockpilePriorityPrefix), nameof(ReplicationStockpilePolicyPostfix));
-            var jobType = AccessTools.TypeByName("NSMedieval.State.WorkerJobs.JobType");
-            if (jobType != null)
-            {
-                count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerJobManager", "OnPriorityAdd", new[] { jobType, typeof(int), typeof(bool) }, nameof(ReplicationWorkerJobPrefix), nameof(ReplicationManagementPolicyPostfix));
-                count += PatchManagementMethod(harmony, "NSMedieval.State.WorkerBehaviour", "ModifyJobPriority", new[] { jobType, typeof(int), typeof(bool) }, nameof(ReplicationWorkerJobModelPrefix), nameof(ReplicationWorkerJobModelPostfix));
-            }
+            count += TryInstallReplicationWorkerJobsCapture(harmony);
             count += PatchManagementMethod(harmony, "NSMedieval.State.WorkerBehaviour", "SetSelfTendingAllowed", new[] { typeof(bool) }, nameof(ReplicationWorkerManageBooleanPrefix), nameof(ReplicationWorkerManageBooleanPostfix));
             count += PatchManagementMethod(harmony, "NSMedieval.State.WorkerBehaviour", "set_UseRallyPoints", new[] { typeof(bool) }, nameof(ReplicationWorkerManageBooleanPrefix), nameof(ReplicationWorkerManageBooleanPostfix));
             count += PatchManagementMethod(harmony, "NSMedieval.State.WorkerBehaviour", "UpdateSingleManagePreset", new[] { typeof(string), typeof(string), typeof(bool) }, nameof(ReplicationWorkerManagePresetPrefix), nameof(ReplicationWorkerManagePresetPostfix));
@@ -111,37 +106,6 @@ namespace GoingCooperative.Plugin.BepInEx
             if (method == null || prefix == null || postfix == null) { LogReplicationWarning("Going Cooperative replication management arity patch missing " + typeName + "." + methodName); return 0; }
             try { harmony.Patch(method, new HarmonyMethod(prefix), new HarmonyMethod(postfix)); return 1; }
             catch (Exception ex) { LogReplicationWarning("Going Cooperative replication management arity patch failed " + typeName + "." + methodName + " " + ex.Message); return 0; }
-        }
-
-        private static bool ReplicationWorkerJobPrefix(object __instance, object __0, int __1, bool __2, ref string? __state)
-        {
-            __state = null;
-            if (IsReplicationRegionOrderStateCaptureSuppressed()) return true;
-            if (!TryGetWorkerPanelHumanoid(__instance, out var humanoid) || humanoid == null
-                || !TryGetReplicationAgentOwnerEntityId(humanoid, out var entityId, out _)) return true;
-            __state = LockstepCommandPayloads.CreateManagementPolicyPayload("WorkerJob", entityId, __0.ToString() ?? string.Empty, 0, __1, __2);
-            if (ShouldSendReplicationLocalCommandIntent()) SendReplicationManagementIntent(__state, "worker-job");
-            return true;
-        }
-
-        private static void ReplicationWorkerJobModelPrefix(object __instance, object __0, int __1, bool __2, ref string? __state)
-        {
-            __state = null;
-            if (!replicationConfigHostMode || IsReplicationRegionOrderStateCaptureSuppressed()) return;
-            var humanoid = AccessTools.Property(__instance.GetType(), "Humanoid")?.GetValue(__instance, null);
-            if (humanoid == null || !TryGetReplicationAgentOwnerEntityId(humanoid, out var entityId, out _)) return;
-            __state = LockstepCommandPayloads.CreateManagementPolicyPayload(
-                "WorkerJob",
-                entityId,
-                __0.ToString() ?? string.Empty,
-                0,
-                __1,
-                __2);
-        }
-
-        private static void ReplicationWorkerJobModelPostfix(string? __state)
-        {
-            BroadcastHostManagementMutation(__state, "worker-job-model");
         }
 
         private static bool ReplicationWorkerManageBooleanPrefix(
@@ -912,11 +876,6 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static void ReplicationManagementPolicyPostfix(string? __state)
         {
-            // Worker jobs retransmit from WorkerBehaviour.ModifyJobPriority so every
-            // host mutation path is covered. Do not also echo the surrounding UI call.
-            if (!string.IsNullOrWhiteSpace(__state)
-                && LockstepCommandPayloads.TryReadManagementPolicyPayload(__state, out var policy, out _, out _, out _, out _, out _)
-                && string.Equals(policy, "WorkerJob", StringComparison.Ordinal)) return;
             BroadcastHostManagementMutation(__state, "management-policy-local");
         }
 
@@ -1200,6 +1159,21 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
+            if (command.Kind == CommandKind.Custom
+                && LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(
+                    command.PayloadJson,
+                    out var jobsTargetId,
+                    out _,
+                    out _,
+                    out _))
+            {
+                SendReplicationWorkerJobsState(
+                    jobsTargetId,
+                    result.Invoked ? "accepted-command" : "rejected-command-correction",
+                    command.Sequence);
+                return;
+            }
+
             if (result.Invoked && command.Kind == CommandKind.Custom
                 && (LockstepCommandPayloads.TryReadResearchActivatePayload(command.PayloadJson, out _)
                     || LockstepCommandPayloads.TryReadProductionQueuePayload(command.PayloadJson, out _, out _, out _, out _, out _, out _, out _)
@@ -1280,6 +1254,36 @@ namespace GoingCooperative.Plugin.BepInEx
 
                     if (!CompleteReplicationWorkerScheduleStateProof(
                             scheduleTargetId,
+                            delta.UniqueId,
+                            out var proofDetail))
+                    {
+                        detail += " proof=" + proofDetail;
+                        return false;
+                    }
+
+                    detail += " proof=" + proofDetail;
+                    return true;
+                }
+
+                if (LockstepCommandPayloads.TryReadWorkerJobsStatePayload(
+                    delta.Detail,
+                    out var jobsTargetId,
+                    out var jobTypes,
+                    out var jobPriorities,
+                    out var jobsActive))
+                {
+                    if (!TryApplyReplicationWorkerJobsState(
+                            jobsTargetId,
+                            jobTypes,
+                            jobPriorities,
+                            jobsActive,
+                            out detail))
+                    {
+                        return false;
+                    }
+
+                    if (!CompleteReplicationWorkerJobsStateProof(
+                            jobsTargetId,
                             delta.UniqueId,
                             out var proofDetail))
                     {
@@ -1441,16 +1445,8 @@ namespace GoingCooperative.Plugin.BepInEx
             }
             if (string.Equals(policy, "WorkerJob", StringComparison.Ordinal))
             {
-                if (!TryFindReplicationAgentOwnerByEntityId(targetId, out var humanoid, out var workerLookup) || humanoid == null)
-                { detail = "worker-job-target-missing " + workerLookup; return false; }
-                var behaviour = AccessTools.Property(humanoid.GetType(), "WorkerBehaviour")?.GetValue(humanoid, null);
-                var method = behaviour == null ? null : AccessTools.Method(behaviour.GetType(), "ModifyJobPriority");
-                if (behaviour == null || method == null) { detail = "worker-job-behaviour-or-method-missing"; return false; }
-                object jobType;
-                try { jobType = Enum.Parse(method.GetParameters()[0].ParameterType, key, true); }
-                catch { detail = "worker-job-type-invalid type=" + key; return false; }
-                method.Invoke(behaviour, new[] { jobType, (object)value, (object)enabled });
-                detail = "ok worker-job entityId=" + targetId + " type=" + key + " priority=" + value + " active=" + enabled; return true;
+                detail = "worker-job-legacy-payload-unsupported";
+                return false;
             }
             if (string.Equals(policy, "WorkerSelfTend", StringComparison.Ordinal)
                 || string.Equals(policy, "WorkerRallyPoints", StringComparison.Ordinal))

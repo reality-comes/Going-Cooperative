@@ -160,6 +160,21 @@ namespace GoingCooperative.Plugin.BepInEx
                     out detail);
             }
 
+            if (LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(
+                payloadJson,
+                out var jobsTargetId,
+                out var jobTypes,
+                out var jobPriorities,
+                out var jobsActive))
+            {
+                return TryApplyReplicationWorkerJobsUpdate(
+                    jobsTargetId,
+                    jobTypes,
+                    jobPriorities,
+                    jobsActive,
+                    out detail);
+            }
+
             if (LockstepCommandPayloads.TryReadManagementPolicyPayload(payloadJson, out var policy, out var targetId, out var key, out var index, out var policyValue, out var policyEnabled))
             {
                 return TryApplyReplicationManagementPolicy(policy, targetId, key, index, policyValue, policyEnabled, out detail);

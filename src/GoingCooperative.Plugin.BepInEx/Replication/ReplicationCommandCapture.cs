@@ -272,8 +272,13 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 command = CoalesceReplicationPendingWorkerScheduleIntent(command);
             }
+            if (IsReplicationWorkerJobsUpdateCommand(command))
+            {
+                command = CoalesceReplicationPendingWorkerJobsIntent(command);
+            }
             if (IsReplicationBuildBatchCommand(command)
-                || IsReplicationWorkerScheduleUpdateCommand(command))
+                || IsReplicationWorkerScheduleUpdateCommand(command)
+                || IsReplicationWorkerJobsUpdateCommand(command))
             {
                 pendingIntentKey = BuildReplicationCommandIntentKey(command);
                 var now = Time.realtimeSinceStartup;
@@ -345,8 +350,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 var pending = pair.Value;
                 var pendingBuildBatch = IsReplicationBuildBatchCommand(pending.Command);
                 var pendingWorkerSchedule = IsReplicationWorkerScheduleUpdateCommand(pending.Command);
-                var workerScheduleAttempts = pending.SendCount + pending.AwaitingResultSendCount;
-                if (pendingWorkerSchedule
+                var pendingWorkerJobs = IsReplicationWorkerJobsUpdateCommand(pending.Command);
+                var pendingDurableManagement = pendingWorkerSchedule || pendingWorkerJobs;
+                var durableManagementAttempts = pending.SendCount + pending.AwaitingResultSendCount;
+                if (pendingDurableManagement
                     && (!replicationRemoteHelloReceived
                         || now - replicationLastRemoteHelloRealtime > ReplicationRemoteHelloFreshSeconds))
                 {
@@ -361,7 +368,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     ? resultRequestWindowExpired
                         ? ReplicationBuildBatchResultDormantRetrySeconds
                         : ReplicationBuildBatchResultRequestRetrySeconds
-                    : pendingWorkerSchedule && workerScheduleAttempts >= ReplicationCommandIntentMaxSends
+                    : pendingDurableManagement
+                        && durableManagementAttempts >= ReplicationCommandIntentMaxSends
                         ? ReplicationManagementIntentDormantRetrySeconds
                         : ReplicationCommandIntentRetrySeconds;
                 if (resultRequestWindowExpired)
@@ -455,6 +463,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     instance?.LogReplicationWarning("Going Cooperative replication command intent retry failed key="
                         + pair.Key
                         + " schedule=" + (pendingWorkerSchedule ? "yes" : "no")
+                        + " jobs=" + (pendingWorkerJobs ? "yes" : "no")
                         + " buildBatch=" + (pendingBuildBatch ? "yes" : "no")
                         + " attempts="
                         + (pending.HostResponded
@@ -482,6 +491,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private const int ReplicationCommandIntentMaxSends = 12;
         private const float ReplicationManagementIntentDormantRetrySeconds = 5f;
         private const int ReplicationPendingWorkerScheduleIntentTargetLimit = 128;
+        private const int ReplicationPendingWorkerJobsIntentTargetLimit = 128;
         private const float ReplicationBuildBatchResultRequestRetrySeconds = 2f;
         private const float ReplicationBuildBatchResultRequestWindowSeconds = 120f;
         private const float ReplicationBuildBatchResultDormantRetrySeconds = 15f;
@@ -503,6 +513,17 @@ namespace GoingCooperative.Plugin.BepInEx
             return command.Kind == CommandKind.Custom
                 && LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
                     command.PayloadJson,
+                    out _,
+                    out _,
+                    out _);
+        }
+
+        private static bool IsReplicationWorkerJobsUpdateCommand(LockstepCommand command)
+        {
+            return command.Kind == CommandKind.Custom
+                && LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(
+                    command.PayloadJson,
+                    out _,
                     out _,
                     out _,
                     out _);
@@ -610,6 +631,124 @@ namespace GoingCooperative.Plugin.BepInEx
                     targetId,
                     mergedHours,
                     mergedValues),
+                newest.TargetStableId,
+                newest.MapX,
+                newest.MapY,
+                newest.MapZ);
+        }
+
+        private static LockstepCommand CoalesceReplicationPendingWorkerJobsIntent(
+            LockstepCommand newest)
+        {
+            if (!LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(
+                    newest.PayloadJson,
+                    out var targetId,
+                    out var newestJobTypes,
+                    out var newestPriorities,
+                    out var newestActive))
+            {
+                return newest;
+            }
+
+            var prior = new List<KeyValuePair<string, PendingReplicationCommandIntent>>();
+            var jobsPendingCount = 0;
+            string? oldestOtherKey = null;
+            PendingReplicationCommandIntent? oldestOther = null;
+            foreach (var pair in ReplicationPendingCommandIntents)
+            {
+                if (!LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(
+                        pair.Value.Command.PayloadJson,
+                        out var pendingTargetId,
+                        out _,
+                        out _,
+                        out _))
+                {
+                    continue;
+                }
+
+                jobsPendingCount++;
+                if (string.Equals(targetId, pendingTargetId, StringComparison.Ordinal))
+                {
+                    prior.Add(pair);
+                    continue;
+                }
+
+                if (oldestOther == null
+                    || pair.Value.CreatedRealtime < oldestOther.CreatedRealtime
+                    || (Math.Abs(pair.Value.CreatedRealtime - oldestOther.CreatedRealtime) < 0.0001f
+                        && pair.Value.Command.Sequence < oldestOther.Command.Sequence))
+                {
+                    oldestOtherKey = pair.Key;
+                    oldestOther = pair.Value;
+                }
+            }
+
+            prior.Sort((left, right) =>
+                left.Value.Command.Sequence.CompareTo(right.Value.Command.Sequence));
+            var valuesByJob = new SortedDictionary<int, ReplicationWorkerJobValue>();
+            for (var i = 0; i < prior.Count; i++)
+            {
+                if (!LockstepCommandPayloads.TryReadWorkerJobsUpdatePayload(
+                        prior[i].Value.Command.PayloadJson,
+                        out _,
+                        out var jobTypes,
+                        out var priorities,
+                        out var active))
+                {
+                    continue;
+                }
+
+                for (var cell = 0; cell < jobTypes.Length; cell++)
+                {
+                    valuesByJob[jobTypes[cell]] = new ReplicationWorkerJobValue(
+                        priorities[cell],
+                        active[cell]);
+                }
+            }
+            for (var cell = 0; cell < newestJobTypes.Length; cell++)
+            {
+                valuesByJob[newestJobTypes[cell]] = new ReplicationWorkerJobValue(
+                    newestPriorities[cell],
+                    newestActive[cell]);
+            }
+
+            for (var i = 0; i < prior.Count; i++)
+            {
+                ReplicationPendingCommandIntents.Remove(prior[i].Key);
+            }
+
+            if (jobsPendingCount - prior.Count >= ReplicationPendingWorkerJobsIntentTargetLimit
+                && oldestOtherKey != null)
+            {
+                ReplicationPendingCommandIntents.Remove(oldestOtherKey);
+                instance?.LogReplicationWarning(
+                    "Going Cooperative worker-jobs pending target cap reached; "
+                    + "discarded oldest unresolved target sequence="
+                    + oldestOther!.Command.Sequence.ToString(CultureInfo.InvariantCulture));
+            }
+
+            var mergedTypes = new int[valuesByJob.Count];
+            var mergedPriorities = new int[valuesByJob.Count];
+            var mergedActive = new bool[valuesByJob.Count];
+            var index = 0;
+            foreach (var pair in valuesByJob)
+            {
+                mergedTypes[index] = pair.Key;
+                mergedPriorities[index] = pair.Value.Priority;
+                mergedActive[index] = pair.Value.Active;
+                index++;
+            }
+
+            return new LockstepCommand(
+                newest.PlayerId,
+                newest.Sequence,
+                newest.TargetTick,
+                newest.Kind,
+                LockstepCommandPayloads.CreateWorkerJobsUpdatePayload(
+                    targetId,
+                    mergedTypes,
+                    mergedPriorities,
+                    mergedActive),
                 newest.TargetStableId,
                 newest.MapX,
                 newest.MapY,
