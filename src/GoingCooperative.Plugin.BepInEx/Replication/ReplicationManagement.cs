@@ -15,7 +15,11 @@ namespace GoingCooperative.Plugin.BepInEx
         private const string ManagementDeltaKind = "ManagementState";
         private const string AnimalStateDeltaKind = "AnimalState";
         private const float ReplicationAnimalAppearanceSnapshotSeconds = 10f;
+        private const float ReplicationHostManagementExactDuplicateSeconds = 0.05f;
         private static bool replicationApplyingProductionRemoval;
+        private static int replicationWorkerManageAuthoritativeApplyDepth;
+        private static string replicationLastHostManagementMutationPayload = string.Empty;
+        private static float replicationLastHostManagementMutationRealtime;
         // Model mutations belonging to one native action commonly arrive as a short burst
         // (for example: decrement training attempts, then write trainer/result; or unrope,
         // change animal type, then clear the order).  Hold the animal reference only until
@@ -45,6 +49,12 @@ namespace GoingCooperative.Plugin.BepInEx
                 count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerJobManager", "OnPriorityAdd", new[] { jobType, typeof(int), typeof(bool) }, nameof(ReplicationWorkerJobPrefix), nameof(ReplicationManagementPolicyPostfix));
                 count += PatchManagementMethod(harmony, "NSMedieval.State.WorkerBehaviour", "ModifyJobPriority", new[] { jobType, typeof(int), typeof(bool) }, nameof(ReplicationWorkerJobModelPrefix), nameof(ReplicationWorkerJobModelPostfix));
             }
+            count += PatchManagementMethod(harmony, "NSMedieval.State.WorkerBehaviour", "SetSelfTendingAllowed", new[] { typeof(bool) }, nameof(ReplicationWorkerManageBooleanPrefix), nameof(ReplicationWorkerManageBooleanPostfix));
+            count += PatchManagementMethod(harmony, "NSMedieval.State.WorkerBehaviour", "set_UseRallyPoints", new[] { typeof(bool) }, nameof(ReplicationWorkerManageBooleanPrefix), nameof(ReplicationWorkerManageBooleanPostfix));
+            count += PatchManagementMethod(harmony, "NSMedieval.State.WorkerBehaviour", "UpdateSingleManagePreset", new[] { typeof(string), typeof(string), typeof(bool) }, nameof(ReplicationWorkerManagePresetPrefix), nameof(ReplicationWorkerManagePresetPostfix));
+            count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerManageRowItem", "OnSelfTendValueChange", new[] { typeof(bool) }, nameof(ReplicationWorkerManageUiPrefix), nameof(ReplicationWorkerManageBooleanUiPostfix));
+            count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerManageRowItem", "OnUseRallyPointsChange", new[] { typeof(bool) }, nameof(ReplicationWorkerManageUiPrefix), nameof(ReplicationWorkerManageBooleanUiPostfix));
+            count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerManageRowItem", "ChangePreset", new[] { typeof(string), typeof(string) }, nameof(ReplicationWorkerManageUiPrefix), nameof(ReplicationWorkerManagePresetUiPostfix));
             var hourType = AccessTools.TypeByName("NSMedieval.Goap.HourType");
             var soundButton = AccessTools.TypeByName("NSEipix.View.UI.SoundButton");
             if (hourType != null && soundButton != null) count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerScheduleManager", "ChangeHourType", new[] { soundButton, hourType }, nameof(ReplicationWorkerScheduleButtonPrefix), nameof(ReplicationManagementPolicyPostfix));
@@ -112,6 +122,135 @@ namespace GoingCooperative.Plugin.BepInEx
         private static void ReplicationWorkerJobModelPostfix(string? __state)
         {
             BroadcastHostManagementMutation(__state, "worker-job-model");
+        }
+
+        private static bool ReplicationWorkerManageBooleanPrefix(
+            object __instance,
+            bool __0,
+            MethodBase __originalMethod,
+            ref string? __state)
+        {
+            __state = null;
+            if (replicationWorkerManageAuthoritativeApplyDepth > 0
+                || (!replicationConfigHostMode && IsReplicationRegionOrderStateCaptureSuppressed())
+                || !TryGetReplicationWorkerBehaviourEntityId(__instance, out var entityId, out _))
+            {
+                return true;
+            }
+
+            var policy = string.Equals(__originalMethod.Name, "SetSelfTendingAllowed", StringComparison.Ordinal)
+                ? "WorkerSelfTend"
+                : string.Equals(__originalMethod.Name, "set_UseRallyPoints", StringComparison.Ordinal)
+                    ? "WorkerRallyPoints"
+                    : string.Empty;
+            if (policy.Length == 0)
+            {
+                return true;
+            }
+
+            __state = LockstepCommandPayloads.CreateManagementPolicyPayload(policy, entityId, string.Empty, 0, 0, __0);
+            if (ShouldSendReplicationLocalCommandIntent())
+            {
+                SendReplicationManagementIntent(__state, "worker-manage:" + policy);
+                // Keep the client model/UI at the requested absolute policy while the
+                // host validates it. Blocking the native setter makes the row restore
+                // its old toggle and fire an immediate inverse callback.
+                return true;
+            }
+
+            return true;
+        }
+
+        private static void ReplicationWorkerManageBooleanPostfix(string? __state, MethodBase __originalMethod)
+        {
+            BroadcastHostManagementMutation(__state, "worker-manage-model:" + __originalMethod.Name);
+        }
+
+        private static bool ReplicationWorkerManagePresetPrefix(
+            object __instance,
+            string __0,
+            string __1,
+            ref bool __2,
+            ref string? __state)
+        {
+            __state = null;
+            if (replicationWorkerManageAuthoritativeApplyDepth > 0
+                || (!replicationConfigHostMode && IsReplicationRegionOrderStateCaptureSuppressed())
+                || string.IsNullOrWhiteSpace(__0)
+                || string.IsNullOrWhiteSpace(__1)
+                || !TryGetReplicationWorkerBehaviourEntityId(__instance, out var entityId, out _))
+            {
+                return true;
+            }
+
+            __state = LockstepCommandPayloads.CreateWorkerManagePresetPayload(entityId, __0, __1, __2);
+            if (ShouldSendReplicationLocalCommandIntent())
+            {
+                SendReplicationManagementIntent(__state, "worker-manage-preset:" + __0);
+                // Mirror only the selected policy locally. ForceAutoEquip schedules
+                // authoritative GOAP work and therefore remains host-only.
+                __2 = false;
+                return true;
+            }
+
+            return true;
+        }
+
+        private static void ReplicationWorkerManagePresetPostfix(string? __state)
+        {
+            BroadcastHostManagementMutation(__state, "worker-manage-preset-model");
+        }
+
+        private static bool ReplicationWorkerManageUiPrefix()
+        {
+            return true;
+        }
+
+        private static void ReplicationWorkerManageBooleanUiPostfix(
+            object __instance,
+            bool __0,
+            MethodBase __originalMethod)
+        {
+            if (!replicationConfigHostMode
+                || replicationWorkerManageAuthoritativeApplyDepth > 0
+                || !TryGetWorkerPanelHumanoid(__instance, out var humanoid)
+                || humanoid == null
+                || !TryGetReplicationAgentOwnerEntityId(humanoid, out var entityId, out _))
+            {
+                return;
+            }
+
+            var policy = string.Equals(__originalMethod.Name, "OnSelfTendValueChange", StringComparison.Ordinal)
+                ? "WorkerSelfTend"
+                : string.Equals(__originalMethod.Name, "OnUseRallyPointsChange", StringComparison.Ordinal)
+                    ? "WorkerRallyPoints"
+                    : string.Empty;
+            if (policy.Length == 0)
+            {
+                return;
+            }
+
+            BroadcastHostManagementMutation(
+                LockstepCommandPayloads.CreateManagementPolicyPayload(policy, entityId, string.Empty, 0, 0, __0),
+                "worker-manage-ui:" + policy);
+        }
+
+        private static void ReplicationWorkerManagePresetUiPostfix(object __instance, string __0, string __1)
+        {
+            if (!replicationConfigHostMode
+                || replicationWorkerManageAuthoritativeApplyDepth > 0
+                || string.IsNullOrWhiteSpace(__0)
+                || string.IsNullOrWhiteSpace(__1)
+                || !TryGetWorkerPanelHumanoid(__instance, out var humanoid)
+                || humanoid == null
+                || !TryGetReplicationAgentOwnerEntityId(humanoid, out var entityId, out _))
+            {
+                return;
+            }
+
+            BroadcastHostManagementMutation(
+                LockstepCommandPayloads.CreateWorkerManagePresetPayload(entityId, __0, __1, true),
+                "worker-manage-preset-ui:" + __0);
         }
 
         private static bool ReplicationAnimalOrderPrefix(object __0, object __1, ref string? __state)
@@ -412,11 +551,25 @@ namespace GoingCooperative.Plugin.BepInEx
         private static void BroadcastHostManagementMutation(string? payload, string source)
         {
             var current = instance;
-            if (string.IsNullOrWhiteSpace(payload) || current == null || !replicationConfigHostMode || !replicationRuntimeStarted || !replicationRemoteHelloReceived)
+            if (payload == null
+                || string.IsNullOrWhiteSpace(payload)
+                || current == null
+                || !replicationConfigHostMode
+                || !replicationRuntimeStarted
+                || !replicationRemoteHelloReceived)
             {
                 return;
             }
 
+            var now = Time.realtimeSinceStartup;
+            if (string.Equals(payload, replicationLastHostManagementMutationPayload, StringComparison.Ordinal)
+                && now - replicationLastHostManagementMutationRealtime < ReplicationHostManagementExactDuplicateSeconds)
+            {
+                return;
+            }
+
+            replicationLastHostManagementMutationPayload = payload;
+            replicationLastHostManagementMutationRealtime = now;
             current.SendReplicationManagementDelta(payload, source);
         }
 
@@ -440,8 +593,12 @@ namespace GoingCooperative.Plugin.BepInEx
             if (result.Invoked && command.Kind == CommandKind.Custom
                 && (LockstepCommandPayloads.TryReadResearchActivatePayload(command.PayloadJson, out _)
                     || LockstepCommandPayloads.TryReadProductionQueuePayload(command.PayloadJson, out _, out _, out _, out _, out _, out _, out _)
+                    || LockstepCommandPayloads.TryReadWorkerManagePresetPayload(command.PayloadJson, out _, out _, out _, out _)
                     || LockstepCommandPayloads.TryReadManagementPolicyPayload(command.PayloadJson, out _, out _, out _, out _, out _, out _)))
             {
+                // Command application is already wrapped in the dedicated Manage
+                // apply guard, so its model postfix cannot duplicate this response.
+                // Keep the proven direct echo path independent of UI-capture gates.
                 SendReplicationManagementDelta(command.PayloadJson, "accepted-command");
             }
         }
@@ -467,6 +624,16 @@ namespace GoingCooperative.Plugin.BepInEx
                     out var value))
                 {
                     return TryApplyReplicationProductionQueue(operation, buildingX, buildingY, buildingZ, ticketIndex, blueprintId, value, out detail);
+                }
+
+                if (LockstepCommandPayloads.TryReadWorkerManagePresetPayload(
+                    delta.Detail,
+                    out var workerTargetId,
+                    out var groupId,
+                    out var presetId,
+                    out var forceAutoEquip))
+                {
+                    return TryApplyReplicationWorkerManagePreset(workerTargetId, groupId, presetId, forceAutoEquip, out detail);
                 }
 
                 if (LockstepCommandPayloads.TryReadManagementPolicyPayload(delta.Detail, out var policy, out var targetId, out var key, out var index, out var policyValue, out var enabled))
@@ -526,6 +693,41 @@ namespace GoingCooperative.Plugin.BepInEx
                 method.Invoke(behaviour, new[] { jobType, (object)value, (object)enabled });
                 detail = "ok worker-job entityId=" + targetId + " type=" + key + " priority=" + value + " active=" + enabled; return true;
             }
+            if (string.Equals(policy, "WorkerSelfTend", StringComparison.Ordinal)
+                || string.Equals(policy, "WorkerRallyPoints", StringComparison.Ordinal))
+            {
+                if (!TryResolveReplicationWorkerBehaviour(targetId, out _, out var behaviour, out var workerLookup) || behaviour == null)
+                {
+                    detail = "worker-manage-target-missing " + workerLookup;
+                    return false;
+                }
+
+                var methodName = string.Equals(policy, "WorkerSelfTend", StringComparison.Ordinal)
+                    ? "SetSelfTendingAllowed"
+                    : "set_UseRallyPoints";
+                var method = AccessTools.Method(behaviour.GetType(), methodName, new[] { typeof(bool) });
+                if (method == null)
+                {
+                    detail = "worker-manage-method-missing method=" + methodName;
+                    return false;
+                }
+
+                replicationWorkerManageAuthoritativeApplyDepth++;
+                try
+                {
+                    method.Invoke(behaviour, new object[] { enabled });
+                    var uiDetail = RefreshReplicationWorkerManageUi(targetId);
+                    detail = "ok worker-manage entityId=" + targetId
+                        + " policy=" + policy
+                        + " enabled=" + enabled.ToString().ToLowerInvariant()
+                        + " ui=" + uiDetail;
+                    return true;
+                }
+                finally
+                {
+                    replicationWorkerManageAuthoritativeApplyDepth--;
+                }
+            }
             if (!TryResolveReplicationStockpileInstanceByObjectId(targetId, out var stockpile, out var lookup) || stockpile == null)
             { detail = "stockpile-policy-target-missing " + lookup; return false; }
             if (string.Equals(policy, "StockpilePriority", StringComparison.Ordinal))
@@ -544,6 +746,115 @@ namespace GoingCooperative.Plugin.BepInEx
                 detail = "ok stockpile-resource objectId=" + targetId + " resourceId=" + key + " allowed=" + enabled; return true;
             }
             detail = "management-policy-unsupported policy=" + policy; return false;
+        }
+
+        private static bool TryApplyReplicationWorkerManagePreset(
+            string targetId,
+            string groupId,
+            string presetId,
+            bool forceAutoEquip,
+            out string detail)
+        {
+            if (!TryResolveReplicationWorkerBehaviour(targetId, out _, out var behaviour, out var workerLookup) || behaviour == null)
+            {
+                detail = "worker-manage-preset-target-missing " + workerLookup;
+                return false;
+            }
+
+            var method = AccessTools.Method(
+                behaviour.GetType(),
+                "UpdateSingleManagePreset",
+                new[] { typeof(string), typeof(string), typeof(bool) });
+            if (method == null)
+            {
+                detail = "worker-manage-preset-method-missing";
+                return false;
+            }
+
+            try
+            {
+                // Only the authoritative host may schedule ForceAutoEquip GOAP. The
+                // client mirrors policy/UI and receives resulting equipment normally.
+                replicationWorkerManageAuthoritativeApplyDepth++;
+                try
+                {
+                    method.Invoke(behaviour, new object[]
+                    {
+                        groupId,
+                        presetId,
+                        replicationConfigHostMode && forceAutoEquip
+                    });
+                    var uiDetail = RefreshReplicationWorkerManageUi(targetId);
+                    detail = "ok worker-manage-preset entityId=" + targetId
+                        + " groupId=" + FormatReplicationWorldObjectDetailToken(groupId)
+                        + " presetId=" + FormatReplicationWorldObjectDetailToken(presetId)
+                        + " hostAutoEquip=" + (replicationConfigHostMode && forceAutoEquip ? "yes" : "no")
+                        + " ui=" + uiDetail;
+                    return true;
+                }
+                finally
+                {
+                    replicationWorkerManageAuthoritativeApplyDepth--;
+                }
+            }
+            catch (Exception ex)
+            {
+                detail = "worker-manage-preset-apply-failed " + FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+        }
+
+        private static bool TryResolveReplicationWorkerBehaviour(
+            string entityId,
+            out object? humanoid,
+            out object? behaviour,
+            out string detail)
+        {
+            behaviour = null;
+            if (!TryFindReplicationAgentOwnerByEntityId(entityId, out humanoid, out detail) || humanoid == null)
+            {
+                return false;
+            }
+
+            behaviour = AccessTools.Property(humanoid.GetType(), "WorkerBehaviour")?.GetValue(humanoid, null)
+                ?? AccessTools.Field(humanoid.GetType(), "workerBehaviour")?.GetValue(humanoid);
+            if (behaviour == null)
+            {
+                detail = "worker-behaviour-missing " + detail;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static string RefreshReplicationWorkerManageUi(string entityId)
+        {
+            var rowType = AccessTools.TypeByName("NSMedieval.UI.WorkerManageRowItem");
+            var updateItems = rowType == null ? null : AccessTools.Method(rowType, "UpdateItems", Type.EmptyTypes);
+            if (rowType == null || updateItems == null)
+            {
+                return "surface-missing";
+            }
+
+            var refreshed = 0;
+            var rows = Resources.FindObjectsOfTypeAll(rowType);
+            for (var i = 0; i < rows.Length; i++)
+            {
+                var row = rows[i];
+                if (row == null
+                    || !TryGetWorkerPanelHumanoid(row, out var humanoid)
+                    || humanoid == null
+                    || !TryGetReplicationAgentOwnerEntityId(humanoid, out var rowEntityId, out _)
+                    || !string.Equals(rowEntityId, entityId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                updateItems.Invoke(row, null);
+                refreshed++;
+            }
+
+            return "rows:" + refreshed.ToString(CultureInfo.InvariantCulture);
         }
 
         private static bool IsReplicationSupportedAnimalOrder(string order, int value)

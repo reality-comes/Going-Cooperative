@@ -323,6 +323,9 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationLastRegionOrderStateKey = string.Empty;
             replicationLastRegionOrderStateRealtime = 0f;
             replicationRegionOrderStateCaptureSuppressionDepth = 0;
+            replicationWorkerManageAuthoritativeApplyDepth = 0;
+            replicationLastHostManagementMutationPayload = string.Empty;
+            replicationLastHostManagementMutationRealtime = 0f;
             ReplicationRecentRegionOrderMarkerStates.Clear();
             replicationLastApplyVisualMoving = 0;
             replicationLastRegionOrderType = string.Empty;

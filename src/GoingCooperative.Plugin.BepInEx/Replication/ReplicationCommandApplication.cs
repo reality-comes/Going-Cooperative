@@ -152,6 +152,21 @@ namespace GoingCooperative.Plugin.BepInEx
                 return TryApplyReplicationManagementPolicy(policy, targetId, key, index, policyValue, policyEnabled, out detail);
             }
 
+            if (LockstepCommandPayloads.TryReadWorkerManagePresetPayload(
+                payloadJson,
+                out var workerManageTargetId,
+                out var workerManageGroupId,
+                out var workerManagePresetId,
+                out var workerManageForceAutoEquip))
+            {
+                return TryApplyReplicationWorkerManagePreset(
+                    workerManageTargetId,
+                    workerManageGroupId,
+                    workerManagePresetId,
+                    workerManageForceAutoEquip,
+                    out detail);
+            }
+
             if (LockstepCommandPayloads.TryReadResearchActivatePayload(payloadJson, out var nodeId))
             {
                 return TryApplyReplicationResearchActivate(nodeId, out detail);

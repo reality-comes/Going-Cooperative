@@ -256,6 +256,21 @@ internal static class CorePolicyTests
         Equal("uid:43", tameTarget, "tame target identity");
         Equal("Tame", tameOrder, "tame order name");
         Equal(2, tameValue, "tame native order value");
+        var managePreset = LockstepCommandPayloads.CreateWorkerManagePresetPayload(
+            "uid:17",
+            "food_manage_group",
+            "food_profile_default",
+            true);
+        Equal(true, LockstepCommandPayloads.TryReadWorkerManagePresetPayload(
+            managePreset,
+            out var manageTarget,
+            out var manageGroup,
+            out var managePresetId,
+            out var manageForceAutoEquip), "worker manage preset parses");
+        Equal("uid:17", manageTarget, "worker manage target");
+        Equal("food_manage_group", manageGroup, "worker manage group");
+        Equal("food_profile_default", managePresetId, "worker manage preset id");
+        Equal(true, manageForceAutoEquip, "worker manage force auto equip");
         var slaughter = LockstepCommandPayloads.CreateManagementPolicyPayload("AnimalOrder", "uid:44", "Slaughter", 0, 4, true);
         Equal(true, LockstepCommandPayloads.TryReadManagementPolicyPayload(slaughter, out var slaughterPolicy, out var slaughterTarget, out var slaughterOrder, out _, out var slaughterValue, out _), "slaughter payload parses");
         Equal("AnimalOrder", slaughterPolicy, "slaughter policy kind");

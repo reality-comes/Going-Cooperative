@@ -25,6 +25,7 @@ namespace GoingCooperative.Core
         public const string ResearchActivateAction = "ResearchActivate";
         public const string ProductionQueueAction = "ProductionQueue";
         public const string ManagementPolicyAction = "ManagementPolicy";
+        public const string WorkerManagePresetAction = "WorkerManagePreset";
         public const string DraftStateAction = "DraftState";
         public const string DraftMoveAction = "DraftMove";
         public const string CombatAttackAction = "CombatAttack";
@@ -420,6 +421,39 @@ namespace GoingCooperative.Core
                 && TryReadIntProperty(normalized, "index", out index)
                 && TryReadIntProperty(normalized, "value", out value)
                 && TryReadBoolProperty(normalized, "enabled", out enabled);
+        }
+
+        public static string CreateWorkerManagePresetPayload(
+            string targetId,
+            string groupId,
+            string presetId,
+            bool forceAutoEquip)
+        {
+            return "{\"action\":\"" + WorkerManagePresetAction
+                + "\",\"targetId\":\"" + EscapeJsonString(targetId)
+                + "\",\"groupId\":\"" + EscapeJsonString(groupId)
+                + "\",\"presetId\":\"" + EscapeJsonString(presetId)
+                + "\",\"forceAutoEquip\":" + (forceAutoEquip ? "true" : "false") + "}";
+        }
+
+        public static bool TryReadWorkerManagePresetPayload(
+            string payloadJson,
+            out string targetId,
+            out string groupId,
+            out string presetId,
+            out bool forceAutoEquip)
+        {
+            var normalized = Normalize(payloadJson);
+            targetId = groupId = presetId = string.Empty;
+            forceAutoEquip = false;
+            return normalized.IndexOf("\"action\":\"" + WorkerManagePresetAction + "\"", StringComparison.Ordinal) >= 0
+                && TryReadStringProperty(normalized, "targetId", out targetId)
+                && TryReadStringProperty(normalized, "groupId", out groupId)
+                && TryReadStringProperty(normalized, "presetId", out presetId)
+                && TryReadBoolProperty(normalized, "forceAutoEquip", out forceAutoEquip)
+                && !string.IsNullOrWhiteSpace(targetId)
+                && !string.IsNullOrWhiteSpace(groupId)
+                && !string.IsNullOrWhiteSpace(presetId);
         }
 
         public static string CreateResearchActivatePayload(string nodeId)

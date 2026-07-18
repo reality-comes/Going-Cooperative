@@ -3258,6 +3258,16 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
+            if (string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal))
+            {
+                // Management rows are absolute state and already have payload-aware
+                // queue/high-water keys. The generic key below contains only kind,
+                // uid, blueprint, and grid; every ManagementState uses the same empty
+                // envelope, so it incorrectly drops different workers and rapid
+                // on/off revisions inside the 500 ms window.
+                return false;
+            }
+
             if (string.Equals(delta.DeltaKind, "AgentNeedLifecycle", StringComparison.Ordinal))
             {
                 // Lifecycle phases may legitimately transition several times inside the
