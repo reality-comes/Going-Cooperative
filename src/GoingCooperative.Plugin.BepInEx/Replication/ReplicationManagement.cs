@@ -18,6 +18,10 @@ namespace GoingCooperative.Plugin.BepInEx
         private const float ReplicationHostManagementExactDuplicateSeconds = 0.05f;
         private static bool replicationApplyingProductionRemoval;
         private static int replicationWorkerManageAuthoritativeApplyDepth;
+        private static int replicationWorkerScheduleAuthoritativeApplyDepth;
+        private static long replicationApplyingRemoteManagementCommandSequence;
+        private static readonly Dictionary<string, long> ReplicationHostWorkerScheduleIntentSequenceByHour =
+            new Dictionary<string, long>(StringComparer.Ordinal);
         private static string replicationLastHostManagementMutationPayload = string.Empty;
         private static float replicationLastHostManagementMutationRealtime;
         // Model mutations belonging to one native action commonly arrive as a short burst
@@ -56,8 +60,24 @@ namespace GoingCooperative.Plugin.BepInEx
             count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerManageRowItem", "OnUseRallyPointsChange", new[] { typeof(bool) }, nameof(ReplicationWorkerManageUiPrefix), nameof(ReplicationWorkerManageBooleanUiPostfix));
             count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerManageRowItem", "ChangePreset", new[] { typeof(string), typeof(string) }, nameof(ReplicationWorkerManageUiPrefix), nameof(ReplicationWorkerManagePresetUiPostfix));
             var hourType = AccessTools.TypeByName("NSMedieval.Goap.HourType");
-            var soundButton = AccessTools.TypeByName("NSEipix.View.UI.SoundButton");
-            if (hourType != null && soundButton != null) count += PatchManagementMethod(harmony, "NSMedieval.UI.WorkerScheduleManager", "ChangeHourType", new[] { soundButton, hourType }, nameof(ReplicationWorkerScheduleButtonPrefix), nameof(ReplicationManagementPolicyPostfix));
+            var scheduleHumanoidType = AccessTools.TypeByName("NSMedieval.State.HumanoidInstance");
+            if (hourType != null && scheduleHumanoidType != null)
+            {
+                count += PatchManagementMethod(
+                    harmony,
+                    "NSMedieval.State.HumanoidInstance",
+                    "ChangeSchedule",
+                    new[] { typeof(int), hourType },
+                    nameof(ReplicationWorkerScheduleModelPrefix),
+                    nameof(ReplicationWorkerScheduleModelPostfix));
+                count += PatchManagementMethod(
+                    harmony,
+                    "NSMedieval.UI.SchedulePanelManager",
+                    "PasteToWorker",
+                    new[] { scheduleHumanoidType },
+                    nameof(ReplicationWorkerSchedulePastePrefix),
+                    nameof(ReplicationWorkerSchedulePastePostfix));
+            }
             var animalOrderType = AccessTools.TypeByName("NSMedieval.Types.AnimalOrderType");
             var animalInstance = AccessTools.TypeByName("NSMedieval.State.AnimalInstance");
             if (animalOrderType != null && animalInstance != null)
@@ -303,18 +323,591 @@ namespace GoingCooperative.Plugin.BepInEx
                 + " pending=" + ReplicationPendingAnimalStateByAnimal.Count.ToString(CultureInfo.InvariantCulture));
         }
 
-        private static bool ReplicationWorkerScheduleButtonPrefix(object __instance, object __0, object __1, ref string? __state)
+        private static void ReplicationWorkerScheduleModelPrefix(
+            object __instance,
+            int __0,
+            object __1,
+            ref string? __state)
         {
             __state = null;
-            if (IsReplicationRegionOrderStateCaptureSuppressed()) return true;
-            if (!TryGetWorkerPanelHumanoid(__instance, out var humanoid) || humanoid == null
-                || !TryGetReplicationAgentOwnerEntityId(humanoid, out var entityId, out _)) return true;
-            if (!TryGetListMember(__instance, "hourButtons", out var hourButtons)) return true;
-            var hour = hourButtons.IndexOf(__0);
-            if (hour < 0) return true;
-            __state = LockstepCommandPayloads.CreateManagementPolicyPayload("WorkerSchedule", entityId, __1.ToString() ?? string.Empty, hour, Convert.ToInt32(__1, CultureInfo.InvariantCulture), true);
-            if (ShouldSendReplicationLocalCommandIntent()) SendReplicationManagementIntent(__state, "worker-schedule");
+            if (replicationWorkerScheduleAuthoritativeApplyDepth > 0
+                || (!replicationConfigHostMode && IsReplicationRegionOrderStateCaptureSuppressed())
+                || !TryGetReplicationAgentOwnerEntityId(__instance, out var entityId, out _)
+                || !TryReadReplicationWorkerScheduleHour(__instance, __0, out var currentValue, out _, out _))
+            {
+                return;
+            }
+
+            int requestedValue;
+            try
+            {
+                requestedValue = Convert.ToInt32(__1, CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+                return;
+            }
+
+            // WorkerScheduleManager.LoadHourColours replays all 24 current values
+            // through ChangeSchedule. Treating those no-op UI paints as edits caused
+            // the historical 24x/288-command storms.
+            if (currentValue == requestedValue)
+            {
+                return;
+            }
+
+            __state = LockstepCommandPayloads.CreateWorkerScheduleUpdatePayload(
+                entityId,
+                new[] { __0 },
+                new[] { requestedValue });
+            if (ShouldSendReplicationLocalCommandIntent())
+            {
+                // The native model mutation is safe to run optimistically on the
+                // client. It has no authoritative GOAP side effect beyond policy.
+                SendReplicationManagementIntent(__state, "worker-schedule-model");
+            }
+        }
+
+        private static void ReplicationWorkerScheduleModelPostfix(object __instance, string? __state)
+        {
+            if (!replicationConfigHostMode || string.IsNullOrWhiteSpace(__state))
+            {
+                return;
+            }
+            if (!LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
+                    __state!,
+                    out var targetId,
+                    out var hours,
+                    out _)
+                || hours.Length != 1)
+            {
+                return;
+            }
+            var hour = hours[0];
+            if (!TryReadReplicationWorkerScheduleHour(
+                    __instance,
+                    hour,
+                    out var actualValue,
+                    out _,
+                    out var readDetail))
+            {
+                instance?.LogReplicationWarning("Going Cooperative worker-schedule authoritative read failed " + readDetail);
+                return;
+            }
+
+            if (!TryCreateReplicationWorkerScheduleStatePayload(
+                    __instance,
+                    targetId,
+                    out var authoritativePayload,
+                    out var stateDetail))
+            {
+                instance?.LogReplicationWarning("Going Cooperative worker-schedule authoritative state failed " + stateDetail);
+                return;
+            }
+            var uiDetail = RefreshReplicationWorkerScheduleUi(targetId, hour, actualValue);
+            BroadcastHostManagementMutation(authoritativePayload, "worker-schedule-model ui=" + uiDetail);
+        }
+
+        private static bool TryReadReplicationWorkerScheduleHour(
+            object humanoid,
+            int hour,
+            out int value,
+            out string name,
+            out string detail)
+        {
+            value = 0;
+            name = string.Empty;
+            var schedule = AccessTools.Property(humanoid.GetType(), "ScheduleHours")?.GetValue(humanoid, null) as Array;
+            if (schedule == null)
+            {
+                detail = "schedule-hours-missing";
+                return false;
+            }
+            if (hour < 0 || hour >= schedule.Length)
+            {
+                detail = "schedule-hour-out-of-range hour=" + hour.ToString(CultureInfo.InvariantCulture)
+                    + " length=" + schedule.Length.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
+
+            var raw = schedule.GetValue(hour);
+            if (raw == null)
+            {
+                detail = "schedule-hour-value-missing hour=" + hour.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
+            try
+            {
+                value = Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+                name = raw.ToString() ?? string.Empty;
+                detail = "ok";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = "schedule-hour-value-invalid " + FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+        }
+
+        private static bool ReplicationWorkerSchedulePastePrefix(
+            object __instance,
+            object __0,
+            ref string? __state)
+        {
+            __state = null;
+            if (replicationWorkerScheduleAuthoritativeApplyDepth > 0
+                || (!replicationConfigHostMode && IsReplicationRegionOrderStateCaptureSuppressed())
+                || !TryGetReplicationAgentOwnerEntityId(__0, out var targetId, out _)
+                || !TryBuildReplicationWorkerSchedulePasteUpdate(
+                    __instance,
+                    __0,
+                    out var hours,
+                    out var hourTypes,
+                    out _))
+            {
+                return true;
+            }
+
+            // Empty paste differences are a native no-op. Skip the original loop so
+            // it cannot replay all copied cells through ChangeSchedule.
+            if (hours.Length == 0)
+            {
+                return false;
+            }
+
+            if (!TryApplyReplicationWorkerScheduleUpdate(
+                    __0,
+                    targetId,
+                    hours,
+                    hourTypes,
+                    applyIntentOrdering: true,
+                    out _))
+            {
+                // Preserve the native fallback if a future game build changes a
+                // schedule surface we could not apply transactionally.
+                return true;
+            }
+
+            var updatePayload = LockstepCommandPayloads.CreateWorkerScheduleUpdatePayload(
+                targetId,
+                hours,
+                hourTypes);
+            if (ShouldSendReplicationLocalCommandIntent())
+            {
+                SendReplicationManagementIntent(updatePayload, "worker-schedule-paste");
+            }
+            else if (replicationConfigHostMode
+                && TryCreateReplicationWorkerScheduleStatePayload(__0, targetId, out var statePayload, out _))
+            {
+                __state = statePayload;
+            }
+
+            return false;
+        }
+
+        private static void ReplicationWorkerSchedulePastePostfix(string? __state)
+        {
+            BroadcastHostManagementMutation(__state, "worker-schedule-paste-model");
+        }
+
+        private static bool TryBuildReplicationWorkerSchedulePasteUpdate(
+            object panel,
+            object humanoid,
+            out int[] hours,
+            out int[] hourTypes,
+            out string detail)
+        {
+            hours = Array.Empty<int>();
+            hourTypes = Array.Empty<int>();
+            if (!TryReadReplicationWorkerScheduleState(humanoid, out var current, out detail))
+            {
+                return false;
+            }
+
+            var copied = AccessTools.Property(panel.GetType(), "CopiedSchedule")?.GetValue(panel, null);
+            if (!(copied is IEnumerable entries))
+            {
+                detail = "schedule-copy-missing";
+                return false;
+            }
+
+            var nativeHourType = AccessTools.TypeByName("NSMedieval.Goap.HourType");
+            if (nativeHourType == null)
+            {
+                detail = "schedule-hour-type-missing";
+                return false;
+            }
+
+            var changed = new SortedDictionary<int, int>();
+            foreach (var entry in entries)
+            {
+                if (entry == null)
+                {
+                    continue;
+                }
+
+                var button = AccessTools.Property(entry.GetType(), "Key")?.GetValue(entry, null);
+                var rawHourType = AccessTools.Property(entry.GetType(), "Value")?.GetValue(entry, null);
+                var rawName = button == null
+                    ? null
+                    : AccessTools.Property(button.GetType(), "name")?.GetValue(button, null);
+                if (!int.TryParse(
+                        Convert.ToString(rawName, CultureInfo.InvariantCulture),
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out var hour)
+                    || hour < 0
+                    || hour >= current.Length
+                    || rawHourType == null)
+                {
+                    detail = "schedule-copy-entry-invalid";
+                    return false;
+                }
+
+                int requested;
+                try
+                {
+                    requested = Convert.ToInt32(rawHourType, CultureInfo.InvariantCulture);
+                }
+                catch (Exception ex)
+                {
+                    detail = "schedule-copy-type-invalid " + FormatReflectionExceptionDetail(ex);
+                    return false;
+                }
+                if (!Enum.IsDefined(nativeHourType, requested) || changed.ContainsKey(hour))
+                {
+                    detail = "schedule-copy-entry-duplicate-or-undefined hour="
+                        + hour.ToString(CultureInfo.InvariantCulture)
+                        + " value=" + requested.ToString(CultureInfo.InvariantCulture);
+                    return false;
+                }
+                if (current[hour] != requested)
+                {
+                    changed.Add(hour, requested);
+                }
+            }
+
+            hours = new int[changed.Count];
+            hourTypes = new int[changed.Count];
+            var index = 0;
+            foreach (var pair in changed)
+            {
+                hours[index] = pair.Key;
+                hourTypes[index] = pair.Value;
+                index++;
+            }
+
+            detail = "ok changes=" + changed.Count.ToString(CultureInfo.InvariantCulture);
             return true;
+        }
+
+        private static bool TryReadReplicationWorkerScheduleState(
+            object humanoid,
+            out int[] hourTypes,
+            out string detail)
+        {
+            hourTypes = Array.Empty<int>();
+            var schedule = AccessTools.Property(humanoid.GetType(), "ScheduleHours")?.GetValue(humanoid, null) as Array;
+            if (schedule == null
+                || schedule.Length == 0
+                || schedule.Length > LockstepCommandPayloads.MaximumWorkerScheduleHours)
+            {
+                detail = schedule == null
+                    ? "schedule-hours-missing"
+                    : "schedule-hours-length-invalid:" + schedule.Length.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
+
+            var values = new int[schedule.Length];
+            for (var i = 0; i < schedule.Length; i++)
+            {
+                var raw = schedule.GetValue(i);
+                if (raw == null)
+                {
+                    detail = "schedule-hour-value-missing hour=" + i.ToString(CultureInfo.InvariantCulture);
+                    return false;
+                }
+                try
+                {
+                    values[i] = Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+                }
+                catch (Exception ex)
+                {
+                    detail = "schedule-hour-value-invalid hour="
+                        + i.ToString(CultureInfo.InvariantCulture)
+                        + " " + FormatReflectionExceptionDetail(ex);
+                    return false;
+                }
+            }
+
+            hourTypes = values;
+            detail = "ok";
+            return true;
+        }
+
+        private static bool TryCreateReplicationWorkerScheduleStatePayload(
+            object humanoid,
+            string targetId,
+            out string payload,
+            out string detail)
+        {
+            payload = string.Empty;
+            if (!TryReadReplicationWorkerScheduleState(humanoid, out var hourTypes, out detail))
+            {
+                return false;
+            }
+
+            payload = LockstepCommandPayloads.CreateWorkerScheduleStatePayload(targetId, hourTypes);
+            detail = "ok hours=" + hourTypes.Length.ToString(CultureInfo.InvariantCulture);
+            return true;
+        }
+
+        private static bool TryApplyReplicationWorkerScheduleUpdate(
+            string targetId,
+            int[] hours,
+            int[] hourTypes,
+            out string detail)
+        {
+            if (!TryFindReplicationAgentOwnerByEntityId(targetId, out var humanoid, out var workerLookup)
+                || humanoid == null)
+            {
+                detail = "worker-schedule-target-missing " + workerLookup;
+                return false;
+            }
+
+            return TryApplyReplicationWorkerScheduleUpdate(
+                humanoid,
+                targetId,
+                hours,
+                hourTypes,
+                applyIntentOrdering: true,
+                out detail);
+        }
+
+        private static bool TryApplyReplicationWorkerScheduleUpdate(
+            object humanoid,
+            string targetId,
+            int[] hours,
+            int[] hourTypes,
+            bool applyIntentOrdering,
+            out string detail)
+        {
+            detail = string.Empty;
+            if (hours == null
+                || hourTypes == null
+                || hours.Length == 0
+                || hours.Length != hourTypes.Length
+                || hours.Length > LockstepCommandPayloads.MaximumWorkerScheduleHours
+                || !TryReadReplicationWorkerScheduleState(humanoid, out var previous, out detail))
+            {
+                detail = "worker-schedule-update-invalid " + detail;
+                return false;
+            }
+
+            var method = AccessTools.Method(humanoid.GetType(), "ChangeSchedule");
+            if (method == null)
+            {
+                detail = "worker-schedule-method-missing";
+                return false;
+            }
+            var nativeHourType = method.GetParameters()[1].ParameterType;
+            if (!nativeHourType.IsEnum)
+            {
+                detail = "worker-schedule-hour-type-not-enum";
+                return false;
+            }
+
+            var eligibleHours = new List<int>();
+            var eligibleValues = new List<int>();
+            var seenHours = new HashSet<int>();
+            var remoteSequence = replicationConfigHostMode && applyIntentOrdering
+                ? replicationApplyingRemoteManagementCommandSequence
+                : 0L;
+            for (var i = 0; i < hours.Length; i++)
+            {
+                var hour = hours[i];
+                var requested = hourTypes[i];
+                if (hour < 0
+                    || hour >= previous.Length
+                    || !seenHours.Add(hour)
+                    || !Enum.IsDefined(nativeHourType, requested))
+                {
+                    detail = "worker-schedule-update-entry-invalid hour="
+                        + hour.ToString(CultureInfo.InvariantCulture)
+                        + " value=" + requested.ToString(CultureInfo.InvariantCulture);
+                    return false;
+                }
+
+                var orderingKey = FormatReplicationWorkerScheduleIntentOrderingKey(targetId, hour);
+                if (remoteSequence > 0L
+                    && ReplicationHostWorkerScheduleIntentSequenceByHour.TryGetValue(orderingKey, out var highWater)
+                    && remoteSequence <= highWater)
+                {
+                    continue;
+                }
+
+                eligibleHours.Add(hour);
+                eligibleValues.Add(requested);
+            }
+
+            if (eligibleHours.Count == 0)
+            {
+                detail = "ok worker-schedule stale-noop entityId=" + targetId
+                    + " sequence=" + remoteSequence.ToString(CultureInfo.InvariantCulture);
+                return true;
+            }
+
+            var changedHours = new List<int>();
+            replicationWorkerScheduleAuthoritativeApplyDepth++;
+            try
+            {
+                for (var i = 0; i < eligibleHours.Count; i++)
+                {
+                    var hour = eligibleHours[i];
+                    if (previous[hour] == eligibleValues[i])
+                    {
+                        continue;
+                    }
+
+                    // Record before invoke: another Harmony postfix can throw after
+                    // the native setter has already committed the array write.
+                    changedHours.Add(hour);
+                    method.Invoke(humanoid, new[]
+                    {
+                        (object)hour,
+                        Enum.ToObject(nativeHourType, eligibleValues[i])
+                    });
+                }
+
+                for (var i = 0; i < eligibleHours.Count; i++)
+                {
+                    if (!TryReadReplicationWorkerScheduleHour(
+                            humanoid,
+                            eligibleHours[i],
+                            out var actual,
+                            out _,
+                            out var readDetail)
+                        || actual != eligibleValues[i])
+                    {
+                        TryRollbackReplicationWorkerScheduleUpdate(
+                            humanoid,
+                            method,
+                            nativeHourType,
+                            previous,
+                            changedHours);
+                        detail = "worker-schedule-update-readback-failed hour="
+                            + eligibleHours[i].ToString(CultureInfo.InvariantCulture)
+                            + " expected=" + eligibleValues[i].ToString(CultureInfo.InvariantCulture)
+                            + " actual=" + actual.ToString(CultureInfo.InvariantCulture)
+                            + " read=" + readDetail;
+                        return false;
+                    }
+                }
+
+                var uiDetail = RefreshReplicationWorkerScheduleUi(
+                    targetId,
+                    eligibleHours.ToArray(),
+                    eligibleValues.ToArray());
+
+                if (remoteSequence > 0L)
+                {
+                    for (var i = 0; i < eligibleHours.Count; i++)
+                    {
+                        ReplicationHostWorkerScheduleIntentSequenceByHour[
+                            FormatReplicationWorkerScheduleIntentOrderingKey(targetId, eligibleHours[i])] = remoteSequence;
+                    }
+                }
+
+                detail = "ok worker-schedule-update entityId=" + targetId
+                    + " accepted=" + eligibleHours.Count.ToString(CultureInfo.InvariantCulture)
+                    + " changed=" + changedHours.Count.ToString(CultureInfo.InvariantCulture)
+                    + " stale=" + (hours.Length - eligibleHours.Count).ToString(CultureInfo.InvariantCulture)
+                    + " ui=" + uiDetail
+                    + " sequence=" + remoteSequence.ToString(CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                TryRollbackReplicationWorkerScheduleUpdate(
+                    humanoid,
+                    method,
+                    nativeHourType,
+                    previous,
+                    changedHours);
+                detail = "worker-schedule-update-apply-failed " + FormatReflectionExceptionDetail(ex);
+                return false;
+            }
+            finally
+            {
+                replicationWorkerScheduleAuthoritativeApplyDepth--;
+            }
+        }
+
+        private static void TryRollbackReplicationWorkerScheduleUpdate(
+            object humanoid,
+            MethodInfo method,
+            Type hourType,
+            int[] previous,
+            List<int> changedHours)
+        {
+            for (var i = changedHours.Count - 1; i >= 0; i--)
+            {
+                var hour = changedHours[i];
+                try
+                {
+                    method.Invoke(humanoid, new[]
+                    {
+                        (object)hour,
+                        Enum.ToObject(hourType, previous[hour])
+                    });
+                }
+                catch
+                {
+                    // The original apply detail remains the primary failure. A later
+                    // authoritative state/recovery path will expose rollback drift.
+                }
+            }
+        }
+
+        private static string FormatReplicationWorkerScheduleIntentOrderingKey(string targetId, int hour)
+        {
+            return targetId + "|hour=" + hour.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static bool TryApplyReplicationWorkerScheduleState(
+            string targetId,
+            int[] hourTypes,
+            out string detail)
+        {
+            if (!TryFindReplicationAgentOwnerByEntityId(targetId, out var humanoid, out var workerLookup)
+                || humanoid == null)
+            {
+                detail = "worker-schedule-state-target-missing " + workerLookup;
+                return false;
+            }
+            if (!TryReadReplicationWorkerScheduleState(humanoid, out var current, out var readDetail)
+                || current.Length != hourTypes.Length)
+            {
+                detail = "worker-schedule-state-length-mismatch local="
+                    + current.Length.ToString(CultureInfo.InvariantCulture)
+                    + " remote=" + hourTypes.Length.ToString(CultureInfo.InvariantCulture)
+                    + " read=" + readDetail;
+                return false;
+            }
+
+            var hours = new int[hourTypes.Length];
+            for (var i = 0; i < hours.Length; i++)
+            {
+                hours[i] = i;
+            }
+            return TryApplyReplicationWorkerScheduleUpdate(
+                humanoid,
+                targetId,
+                hours,
+                hourTypes,
+                applyIntentOrdering: false,
+                out detail);
         }
 
         private static void ReplicationManagementPolicyPostfix(string? __state)
@@ -573,13 +1166,16 @@ namespace GoingCooperative.Plugin.BepInEx
             current.SendReplicationManagementDelta(payload, source);
         }
 
-        private void SendReplicationManagementDelta(string payload, string source)
+        private void SendReplicationManagementDelta(
+            string payload,
+            string source,
+            long originCommandSequence = 0L)
         {
             SendReplicationWorldObjectDelta(new ReplicationWorldObjectDelta(
                 ++replicationWorldObjectDeltaSequence,
                 Time.realtimeSinceStartup,
                 ManagementDeltaKind,
-                0,
+                originCommandSequence,
                 string.Empty,
                 0,
                 0,
@@ -590,6 +1186,20 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void SendReplicationManagementStateIfSupported(LockstepCommand command, RuntimeCommandResult result)
         {
+            if (command.Kind == CommandKind.Custom
+                && LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
+                    command.PayloadJson,
+                    out var scheduleTargetId,
+                    out _,
+                    out _))
+            {
+                SendReplicationWorkerScheduleState(
+                    scheduleTargetId,
+                    result.Invoked ? "accepted-command" : "rejected-command-correction",
+                    command.Sequence);
+                return;
+            }
+
             if (result.Invoked && command.Kind == CommandKind.Custom
                 && (LockstepCommandPayloads.TryReadResearchActivatePayload(command.PayloadJson, out _)
                     || LockstepCommandPayloads.TryReadProductionQueuePayload(command.PayloadJson, out _, out _, out _, out _, out _, out _, out _)
@@ -601,6 +1211,35 @@ namespace GoingCooperative.Plugin.BepInEx
                 // Keep the proven direct echo path independent of UI-capture gates.
                 SendReplicationManagementDelta(command.PayloadJson, "accepted-command");
             }
+        }
+
+        private void SendReplicationWorkerScheduleState(
+            string targetId,
+            string source,
+            long originCommandSequence)
+        {
+            if (!TryFindReplicationAgentOwnerByEntityId(targetId, out var humanoid, out var workerLookup)
+                || humanoid == null)
+            {
+                LogReplicationWarning("Going Cooperative worker-schedule state send target missing target="
+                    + targetId + " lookup=" + workerLookup);
+                return;
+            }
+            if (!TryCreateReplicationWorkerScheduleStatePayload(
+                    humanoid,
+                    targetId,
+                    out var payload,
+                    out var stateDetail))
+            {
+                LogReplicationWarning("Going Cooperative worker-schedule state send failed target="
+                    + targetId + " state=" + stateDetail);
+                return;
+            }
+
+            SendReplicationManagementDelta(
+                payload,
+                source + ":worker-schedule-state",
+                originCommandSequence);
         }
 
         private static bool TryApplyReplicationManagementDelta(ReplicationWorldObjectDelta delta, out string detail)
@@ -624,6 +1263,32 @@ namespace GoingCooperative.Plugin.BepInEx
                     out var value))
                 {
                     return TryApplyReplicationProductionQueue(operation, buildingX, buildingY, buildingZ, ticketIndex, blueprintId, value, out detail);
+                }
+
+                if (LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(
+                    delta.Detail,
+                    out var scheduleTargetId,
+                    out var scheduleHourTypes))
+                {
+                    if (!TryApplyReplicationWorkerScheduleState(
+                            scheduleTargetId,
+                            scheduleHourTypes,
+                            out detail))
+                    {
+                        return false;
+                    }
+
+                    if (!CompleteReplicationWorkerScheduleStateProof(
+                            scheduleTargetId,
+                            delta.UniqueId,
+                            out var proofDetail))
+                    {
+                        detail += " proof=" + proofDetail;
+                        return false;
+                    }
+
+                    detail += " proof=" + proofDetail;
+                    return true;
                 }
 
                 if (LockstepCommandPayloads.TryReadWorkerManagePresetPayload(
@@ -650,6 +1315,97 @@ namespace GoingCooperative.Plugin.BepInEx
             }
         }
 
+        private static bool CompleteReplicationWorkerScheduleStateProof(
+            string targetId,
+            long originCommandSequence,
+            out string detail)
+        {
+            var completedKeys = new List<string>();
+            var newer = new List<PendingReplicationCommandIntent>();
+            foreach (var pair in ReplicationPendingCommandIntents)
+            {
+                var pending = pair.Value;
+                if (!LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
+                        pending.Command.PayloadJson,
+                        out var pendingTargetId,
+                        out _,
+                        out _)
+                    || !string.Equals(targetId, pendingTargetId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (originCommandSequence > 0L
+                    && pending.Command.Sequence <= originCommandSequence)
+                {
+                    completedKeys.Add(pair.Key);
+                }
+                else
+                {
+                    newer.Add(pending);
+                }
+            }
+
+            for (var i = 0; i < completedKeys.Count; i++)
+            {
+                ReplicationPendingCommandIntents.Remove(completedKeys[i]);
+            }
+
+            if (newer.Count == 0)
+            {
+                detail = "ok completed="
+                    + completedKeys.Count.ToString(CultureInfo.InvariantCulture)
+                    + " newer=0";
+                return true;
+            }
+
+            newer.Sort((left, right) => left.Command.Sequence.CompareTo(right.Command.Sequence));
+            var valuesByHour = new SortedDictionary<int, int>();
+            for (var i = 0; i < newer.Count; i++)
+            {
+                if (!LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
+                        newer[i].Command.PayloadJson,
+                        out _,
+                        out var hours,
+                        out var hourTypes))
+                {
+                    continue;
+                }
+
+                for (var cell = 0; cell < hours.Length; cell++)
+                {
+                    valuesByHour[hours[cell]] = hourTypes[cell];
+                }
+            }
+
+            var overlayHours = new int[valuesByHour.Count];
+            var overlayValues = new int[valuesByHour.Count];
+            var index = 0;
+            foreach (var pair in valuesByHour)
+            {
+                overlayHours[index] = pair.Key;
+                overlayValues[index] = pair.Value;
+                index++;
+            }
+
+            if (overlayHours.Length > 0
+                && !TryApplyReplicationWorkerScheduleUpdate(
+                    targetId,
+                    overlayHours,
+                    overlayValues,
+                    out var overlayDetail))
+            {
+                detail = "newer-overlay-failed " + overlayDetail;
+                return false;
+            }
+
+            detail = "ok completed="
+                + completedKeys.Count.ToString(CultureInfo.InvariantCulture)
+                + " newer=" + newer.Count.ToString(CultureInfo.InvariantCulture)
+                + " overlayHours=" + overlayHours.Length.ToString(CultureInfo.InvariantCulture);
+            return true;
+        }
+
         private static bool TryApplyReplicationManagementPolicy(string policy, string targetId, string key, int index, int value, bool enabled, out string detail)
         {
             if (string.Equals(policy, "AnimalOrder", StringComparison.Ordinal))
@@ -672,13 +1428,16 @@ namespace GoingCooperative.Plugin.BepInEx
             }
             if (string.Equals(policy, "WorkerSchedule", StringComparison.Ordinal))
             {
-                if (!TryFindReplicationAgentOwnerByEntityId(targetId, out var humanoid, out var workerLookup) || humanoid == null)
-                { detail = "worker-schedule-target-missing " + workerLookup; return false; }
-                var method = AccessTools.Method(humanoid.GetType(), "ChangeSchedule");
-                if (method == null) { detail = "worker-schedule-method-missing"; return false; }
-                var hourType = Enum.ToObject(method.GetParameters()[1].ParameterType, value);
-                method.Invoke(humanoid, new[] { (object)index, hourType });
-                detail = "ok worker-schedule entityId=" + targetId + " hour=" + index + " type=" + key; return true;
+                if (!enabled)
+                {
+                    detail = "worker-schedule-legacy-disabled-invalid";
+                    return false;
+                }
+                return TryApplyReplicationWorkerScheduleUpdate(
+                    targetId,
+                    new[] { index },
+                    new[] { value },
+                    out detail);
             }
             if (string.Equals(policy, "WorkerJob", StringComparison.Ordinal))
             {
@@ -855,6 +1614,159 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             return "rows:" + refreshed.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string RefreshReplicationWorkerScheduleUi(string entityId, int hour, int value)
+        {
+            return RefreshReplicationWorkerScheduleUi(
+                entityId,
+                new[] { hour },
+                new[] { value });
+        }
+
+        private static string RefreshReplicationWorkerScheduleUi(
+            string entityId,
+            int[] hours,
+            int[] values)
+        {
+            var managerType = AccessTools.TypeByName("NSMedieval.UI.WorkerScheduleManager");
+            var imageType = AccessTools.TypeByName("UnityEngine.UI.Image");
+            if (managerType == null || imageType == null)
+            {
+                return "surface-missing";
+            }
+            if (hours == null || values == null || hours.Length == 0 || hours.Length != values.Length)
+            {
+                return "refresh-values-invalid";
+            }
+
+            var colors = new Dictionary<int, object>();
+            for (var i = 0; i < values.Length; i++)
+            {
+                if (colors.ContainsKey(values[i]))
+                {
+                    continue;
+                }
+                if (!TryResolveReplicationWorkerScheduleColor(values[i], out var color, out var colorDetail)
+                    || color == null)
+                {
+                    return "color-missing:" + colorDetail;
+                }
+                colors.Add(values[i], color);
+            }
+
+            var refreshedRows = 0;
+            var refreshedCells = 0;
+            var failed = 0;
+            var managers = Resources.FindObjectsOfTypeAll(managerType);
+            for (var i = 0; i < managers.Length; i++)
+            {
+                var manager = managers[i];
+                if (manager == null
+                    || !TryGetWorkerPanelHumanoid(manager, out var humanoid)
+                    || humanoid == null
+                    || !TryGetReplicationAgentOwnerEntityId(humanoid, out var rowEntityId, out _)
+                    || !string.Equals(rowEntityId, entityId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (!TryGetListMember(manager, "hourButtons", out var hourButtons))
+                    {
+                        failed++;
+                        continue;
+                    }
+
+                    var rowFailed = false;
+                    for (var cell = 0; cell < hours.Length; cell++)
+                    {
+                        var hour = hours[cell];
+                        if (hour < 0
+                            || hour >= hourButtons.Count
+                            || !(hourButtons[hour] is Component button))
+                        {
+                            failed++;
+                            rowFailed = true;
+                            continue;
+                        }
+
+                        var image = button.GetComponent(imageType);
+                        var colorProperty = image == null ? null : AccessTools.Property(image.GetType(), "color");
+                        if (image == null || colorProperty == null || !colorProperty.CanWrite)
+                        {
+                            failed++;
+                            rowFailed = true;
+                            continue;
+                        }
+
+                        // Paint only the authoritative cells. Calling the native
+                        // ChangeHourType refresh path would mutate the schedule a
+                        // second time and retrigger RoleJob warning recomputation.
+                        colorProperty.SetValue(image, colors[values[cell]], null);
+                        refreshedCells++;
+                    }
+                    if (!rowFailed)
+                    {
+                        refreshedRows++;
+                    }
+                }
+                catch
+                {
+                    failed++;
+                }
+            }
+
+            return "rows:" + refreshedRows.ToString(CultureInfo.InvariantCulture)
+                + " cells:" + refreshedCells.ToString(CultureInfo.InvariantCulture)
+                + " failed:" + failed.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static bool TryResolveReplicationWorkerScheduleColor(
+            int value,
+            out object? color,
+            out string detail)
+        {
+            color = null;
+            var marker = AccessTools.TypeByName("NSMedieval.Repository.ScheduleModelRepository");
+            var modelType = AccessTools.TypeByName("NSMedieval.Goap.ScheduleModel");
+            var hourType = AccessTools.TypeByName("NSMedieval.Goap.HourType");
+            var repositoryDefinition = AccessTools.TypeByName("NSEipix.Repository.Repository`2");
+            if (marker == null || modelType == null || hourType == null || repositoryDefinition == null)
+            {
+                detail = "repository-types-missing";
+                return false;
+            }
+            if (!Enum.IsDefined(hourType, value))
+            {
+                detail = "hour-type-invalid:" + value.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
+
+            try
+            {
+                var repositoryType = repositoryDefinition.MakeGenericType(marker, modelType);
+                var repository = AccessTools.Property(repositoryType, "Instance")?.GetValue(null, null);
+                var getById = AccessTools.Method(repositoryType, "GetByID", new[] { typeof(string) });
+                var model = repository == null || getById == null
+                    ? null
+                    : getById.Invoke(repository, new object[] { "worker" });
+                var getScheduleData = model == null
+                    ? null
+                    : AccessTools.Method(model.GetType(), "GetScheduleData", new[] { hourType });
+                var scheduleData = getScheduleData?.Invoke(model, new[] { Enum.ToObject(hourType, value) });
+                color = scheduleData == null
+                    ? null
+                    : AccessTools.Property(scheduleData.GetType(), "Color")?.GetValue(scheduleData, null);
+                detail = color == null ? "schedule-color-missing" : "ok";
+                return color != null;
+            }
+            catch (Exception ex)
+            {
+                detail = "schedule-color-read-failed " + FormatReflectionExceptionDetail(ex);
+                return false;
+            }
         }
 
         private static bool IsReplicationSupportedAnimalOrder(string order, int value)

@@ -266,20 +266,24 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static void SendReplicationLocalCommandIntent(LockstepCommand command, string source)
         {
-            PendingReplicationCommandIntent? pendingBuild = null;
-            var pendingBuildKey = string.Empty;
-            if (command.Kind == CommandKind.Build
-                && IsReplicationBuildBatchCommand(command))
+            PendingReplicationCommandIntent? pendingIntent = null;
+            var pendingIntentKey = string.Empty;
+            if (IsReplicationWorkerScheduleUpdateCommand(command))
             {
-                pendingBuildKey = BuildReplicationCommandIntentKey(command);
+                command = CoalesceReplicationPendingWorkerScheduleIntent(command);
+            }
+            if (IsReplicationBuildBatchCommand(command)
+                || IsReplicationWorkerScheduleUpdateCommand(command))
+            {
+                pendingIntentKey = BuildReplicationCommandIntentKey(command);
                 var now = Time.realtimeSinceStartup;
-                pendingBuild = new PendingReplicationCommandIntent(
+                pendingIntent = new PendingReplicationCommandIntent(
                     command,
                     source,
                     now,
                     now - ReplicationCommandIntentRetrySeconds,
                     0);
-                ReplicationPendingCommandIntents[pendingBuildKey] = pendingBuild;
+                ReplicationPendingCommandIntents[pendingIntentKey] = pendingIntent;
             }
 
             try
@@ -290,10 +294,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 }
 
                 replicationTransport.Send(ReplicationPayloadCodec.ForCommandIntent(ReplicationClientPeerId, new ReplicationCommandIntent(command)));
-                if (pendingBuild != null)
+                if (pendingIntent != null)
                 {
-                    pendingBuild.LastSentRealtime = Time.realtimeSinceStartup;
-                    pendingBuild.SendCount = 1;
+                    pendingIntent.LastSentRealtime = Time.realtimeSinceStartup;
+                    pendingIntent.SendCount = 1;
                 }
                 replicationIntentsSent++;
                 replicationLastIntentSummary = "captured source="
@@ -307,18 +311,18 @@ namespace GoingCooperative.Plugin.BepInEx
             }
             catch (Exception ex)
             {
-                if (pendingBuild != null)
+                if (pendingIntent != null)
                 {
-                    // A throwing transport is still an attempted delivery. Without this
-                    // accounting, an unaccepted BuildBatch and its provisional views can
-                    // retry forever while never reaching the deterministic rollback cap.
-                    pendingBuild.LastSentRealtime = Time.realtimeSinceStartup;
-                    pendingBuild.SendCount = Math.Max(1, pendingBuild.SendCount + 1);
+                    // A throwing transport is still an attempted delivery. BuildBatch
+                    // uses this count for its rollback cap; durable management intents
+                    // use it to enter their low-rate retry cadence.
+                    pendingIntent.LastSentRealtime = Time.realtimeSinceStartup;
+                    pendingIntent.SendCount = Math.Max(1, pendingIntent.SendCount + 1);
                 }
                 instance?.LogReplicationWarning("Going Cooperative replication local command intent send failed source="
                     + source
                     + " attempts="
-                    + (pendingBuild?.SendCount ?? 0).ToString(CultureInfo.InvariantCulture)
+                    + (pendingIntent?.SendCount ?? 0).ToString(CultureInfo.InvariantCulture)
                     + " error="
                     + ex.GetType().Name
                     + ":"
@@ -339,13 +343,27 @@ namespace GoingCooperative.Plugin.BepInEx
             foreach (var pair in ReplicationPendingCommandIntents)
             {
                 var pending = pair.Value;
-                var resultRequestWindowExpired = pending.HostResponded
+                var pendingBuildBatch = IsReplicationBuildBatchCommand(pending.Command);
+                var pendingWorkerSchedule = IsReplicationWorkerScheduleUpdateCommand(pending.Command);
+                var workerScheduleAttempts = pending.SendCount + pending.AwaitingResultSendCount;
+                if (pendingWorkerSchedule
+                    && (!replicationRemoteHelloReceived
+                        || now - replicationLastRemoteHelloRealtime > ReplicationRemoteHelloFreshSeconds))
+                {
+                    // Keep the coalesced desired row, but do not create an offline
+                    // retry storm. A fresh hello resumes delivery automatically.
+                    continue;
+                }
+                var resultRequestWindowExpired = pendingBuildBatch
+                    && pending.HostResponded
                     && now - pending.AwaitingResultStartedRealtime >= ReplicationBuildBatchResultRequestWindowSeconds;
-                var retrySeconds = pending.HostResponded
+                var retrySeconds = pendingBuildBatch && pending.HostResponded
                     ? resultRequestWindowExpired
                         ? ReplicationBuildBatchResultDormantRetrySeconds
                         : ReplicationBuildBatchResultRequestRetrySeconds
-                    : ReplicationCommandIntentRetrySeconds;
+                    : pendingWorkerSchedule && workerScheduleAttempts >= ReplicationCommandIntentMaxSends
+                        ? ReplicationManagementIntentDormantRetrySeconds
+                        : ReplicationCommandIntentRetrySeconds;
                 if (resultRequestWindowExpired)
                 {
                     if (!pending.ResultRequestWindowExpiredLogged)
@@ -371,7 +389,9 @@ namespace GoingCooperative.Plugin.BepInEx
                     continue;
                 }
 
-                if (!pending.HostResponded && pending.SendCount >= ReplicationCommandIntentMaxSends)
+                if (pendingBuildBatch
+                    && !pending.HostResponded
+                    && pending.SendCount >= ReplicationCommandIntentMaxSends)
                 {
                     var rolledBack = RollbackReplicationProvisionalBuildViews(
                         pending.Command,
@@ -428,12 +448,14 @@ namespace GoingCooperative.Plugin.BepInEx
                     }
                     else
                     {
-                        // Failed transport attempts count toward the same bounded retry
-                        // policy as successful sends that receive no acknowledgement.
+                        // Failed transport attempts count toward the same bounded retry cadence
+                        // as successful sends that receive no acknowledgement.
                         pending.SendCount++;
                     }
-                    instance?.LogReplicationWarning("Going Cooperative replication build batch retry failed key="
+                    instance?.LogReplicationWarning("Going Cooperative replication command intent retry failed key="
                         + pair.Key
+                        + " schedule=" + (pendingWorkerSchedule ? "yes" : "no")
+                        + " buildBatch=" + (pendingBuildBatch ? "yes" : "no")
                         + " attempts="
                         + (pending.HostResponded
                             ? pending.AwaitingResultSendCount
@@ -458,6 +480,8 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private const float ReplicationCommandIntentRetrySeconds = 0.5f;
         private const int ReplicationCommandIntentMaxSends = 12;
+        private const float ReplicationManagementIntentDormantRetrySeconds = 5f;
+        private const int ReplicationPendingWorkerScheduleIntentTargetLimit = 128;
         private const float ReplicationBuildBatchResultRequestRetrySeconds = 2f;
         private const float ReplicationBuildBatchResultRequestWindowSeconds = 120f;
         private const float ReplicationBuildBatchResultDormantRetrySeconds = 15f;
@@ -472,6 +496,124 @@ namespace GoingCooperative.Plugin.BepInEx
                     out _,
                     out _,
                     out _);
+        }
+
+        private static bool IsReplicationWorkerScheduleUpdateCommand(LockstepCommand command)
+        {
+            return command.Kind == CommandKind.Custom
+                && LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
+                    command.PayloadJson,
+                    out _,
+                    out _,
+                    out _);
+        }
+
+        private static LockstepCommand CoalesceReplicationPendingWorkerScheduleIntent(
+            LockstepCommand newest)
+        {
+            if (!LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
+                    newest.PayloadJson,
+                    out var targetId,
+                    out var newestHours,
+                    out var newestValues))
+            {
+                return newest;
+            }
+
+            var prior = new List<KeyValuePair<string, PendingReplicationCommandIntent>>();
+            var schedulePendingCount = 0;
+            string? oldestOtherKey = null;
+            PendingReplicationCommandIntent? oldestOther = null;
+            foreach (var pair in ReplicationPendingCommandIntents)
+            {
+                if (!LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
+                        pair.Value.Command.PayloadJson,
+                        out var pendingTargetId,
+                        out _,
+                        out _))
+                {
+                    continue;
+                }
+
+                schedulePendingCount++;
+                if (string.Equals(targetId, pendingTargetId, StringComparison.Ordinal))
+                {
+                    prior.Add(pair);
+                    continue;
+                }
+
+                if (oldestOther == null
+                    || pair.Value.CreatedRealtime < oldestOther.CreatedRealtime
+                    || (Math.Abs(pair.Value.CreatedRealtime - oldestOther.CreatedRealtime) < 0.0001f
+                        && pair.Value.Command.Sequence < oldestOther.Command.Sequence))
+                {
+                    oldestOtherKey = pair.Key;
+                    oldestOther = pair.Value;
+                }
+            }
+
+            prior.Sort((left, right) =>
+                left.Value.Command.Sequence.CompareTo(right.Value.Command.Sequence));
+            var valuesByHour = new SortedDictionary<int, int>();
+            for (var i = 0; i < prior.Count; i++)
+            {
+                if (!LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
+                        prior[i].Value.Command.PayloadJson,
+                        out _,
+                        out var hours,
+                        out var values))
+                {
+                    continue;
+                }
+
+                for (var cell = 0; cell < hours.Length; cell++)
+                {
+                    valuesByHour[hours[cell]] = values[cell];
+                }
+            }
+            for (var cell = 0; cell < newestHours.Length; cell++)
+            {
+                valuesByHour[newestHours[cell]] = newestValues[cell];
+            }
+
+            for (var i = 0; i < prior.Count; i++)
+            {
+                ReplicationPendingCommandIntents.Remove(prior[i].Key);
+            }
+
+            if (schedulePendingCount - prior.Count >= ReplicationPendingWorkerScheduleIntentTargetLimit
+                && oldestOtherKey != null)
+            {
+                ReplicationPendingCommandIntents.Remove(oldestOtherKey);
+                instance?.LogReplicationWarning(
+                    "Going Cooperative worker-schedule pending target cap reached; "
+                    + "discarded oldest unresolved target sequence="
+                    + oldestOther!.Command.Sequence.ToString(CultureInfo.InvariantCulture));
+            }
+
+            var mergedHours = new int[valuesByHour.Count];
+            var mergedValues = new int[valuesByHour.Count];
+            var index = 0;
+            foreach (var pair in valuesByHour)
+            {
+                mergedHours[index] = pair.Key;
+                mergedValues[index] = pair.Value;
+                index++;
+            }
+
+            return new LockstepCommand(
+                newest.PlayerId,
+                newest.Sequence,
+                newest.TargetTick,
+                newest.Kind,
+                LockstepCommandPayloads.CreateWorkerScheduleUpdatePayload(
+                    targetId,
+                    mergedHours,
+                    mergedValues),
+                newest.TargetStableId,
+                newest.MapX,
+                newest.MapY,
+                newest.MapZ);
         }
 
         private static bool CompleteReplicationBuildBatchPendingIntent(string playerId, long commandSequence)

@@ -2544,7 +2544,8 @@ namespace GoingCooperative.Plugin.BepInEx
                         || string.Equals(
                             delta.DeltaKind,
                             ReplicationBuildingRecoveryRequiredV2DeltaKind,
-                            StringComparison.Ordinal))
+                            StringComparison.Ordinal)
+                        || IsReplicationWorkerScheduleStateDelta(delta))
                     {
                         // Lifecycle rows are absolute, revisioned state. Once a newer
                         // row exists for a building, retaining/retrying every older row
@@ -3400,6 +3401,17 @@ namespace GoingCooperative.Plugin.BepInEx
         private static string FormatReplicationPendingBuildingLifecycleSupersessionKey(
             ReplicationWorldObjectDelta delta)
         {
+            if (IsReplicationWorkerScheduleStateDelta(delta)
+                && LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(
+                    delta.Detail,
+                    out var scheduleTargetId,
+                    out _))
+            {
+                return ManagementDeltaKind
+                    + "|policy=WorkerScheduleState|target="
+                    + scheduleTargetId;
+            }
+
             if (string.Equals(
                     delta.DeltaKind,
                     ReplicationBuildingRecoveryRequiredV2DeltaKind,
@@ -3425,6 +3437,16 @@ namespace GoingCooperative.Plugin.BepInEx
                     + "|epoch=" + epoch.ToString(CultureInfo.InvariantCulture)
                     + "|uid=" + delta.UniqueId.ToString(CultureInfo.InvariantCulture)
                 : string.Empty;
+        }
+
+        private static bool IsReplicationWorkerScheduleStateDelta(
+            ReplicationWorldObjectDelta delta)
+        {
+            return string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal)
+                && LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(
+                    delta.Detail,
+                    out _,
+                    out _);
         }
 
         // Caller holds ReplicationWorldObjectDeltaLock.
@@ -3465,6 +3487,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 && durablePending.SendCount >= ReplicationBuildBatchWorldObjectDeltaMaxSends)
             {
                 return ReplicationBuildingDurableRetrySeconds;
+            }
+
+            if (IsReplicationWorkerScheduleStateDelta(delta)
+                && replicationPendingWorldObjectDeltas.TryGetValue(delta.Sequence, out var schedulePending)
+                && schedulePending.SendCount >= ReplicationWorldObjectDeltaMaxSends)
+            {
+                return ReplicationWorkerScheduleStateDurableRetrySeconds;
             }
 
             return ReplicationWorldObjectDeltaRetrySeconds;
@@ -3542,7 +3571,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     return false;
                 }
 
-                var durableTransaction = string.Equals(
+                var durableWorkerScheduleState = IsReplicationWorkerScheduleStateDelta(delta);
+                var durableTransaction = durableWorkerScheduleState || string.Equals(
                         delta.DeltaKind,
                         ReplicationBuildingBlueprintBatchPlacedDeltaKind,
                         StringComparison.Ordinal)
@@ -3556,6 +3586,13 @@ namespace GoingCooperative.Plugin.BepInEx
                         StringComparison.Ordinal);
                 if (durableTransaction)
                 {
+                    if (durableWorkerScheduleState)
+                    {
+                        // This is a complete, coalesced row. Retain at most one per
+                        // worker and retry slowly until the client proves application.
+                        return false;
+                    }
+
                     // Placement/result is transaction state, not telemetry. Retain it
                     // with a slow retry until ACK or session reset and separately tell
                     // the client to recover instead of silently forgetting it.
@@ -3614,6 +3651,13 @@ namespace GoingCooperative.Plugin.BepInEx
             if (replicationConfigHostMode)
             {
                 replicationLastWorldObjectDeltaSummary = "ignored-on-host " + FormatReplicationWorldObjectDelta(delta);
+                return;
+            }
+
+            if (!replicationRemoteHelloReceived || replicationRemoteCompatibilityRefused)
+            {
+                replicationLastWorldObjectDeltaSummary = "ignored-incompatible-or-prehello "
+                    + FormatReplicationWorldObjectDelta(delta);
                 return;
             }
 
@@ -15623,6 +15667,20 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             if (string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal)
+                && LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(
+                    delta.Detail,
+                    out var scheduleTargetId,
+                    out _))
+            {
+                // Every schedule result is a complete authoritative row. One key per
+                // worker makes single-hour edits and atomic paste results share the
+                // same ordering/high-water lane.
+                return ManagementDeltaKind
+                    + "|policy=WorkerScheduleState|target="
+                    + scheduleTargetId;
+            }
+
+            if (string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal)
                 && LockstepCommandPayloads.TryReadManagementPolicyPayload(
                     delta.Detail,
                     out var policy,
@@ -15638,7 +15696,14 @@ namespace GoingCooperative.Plugin.BepInEx
                 return ManagementDeltaKind
                     + "|policy=" + policy
                     + "|target=" + targetId
-                    + (string.Equals(policy, "AnimalOrder", StringComparison.Ordinal) ? string.Empty : "|key=" + key)
+                    // Animal order and schedule key carry the new value, not the
+                    // setting identity. Their absolute-state keys are respectively
+                    // animal and worker+hour; including the new value would let an
+                    // older revision survive in a second ordering/coalescing lane.
+                    + (string.Equals(policy, "AnimalOrder", StringComparison.Ordinal)
+                        || string.Equals(policy, "WorkerSchedule", StringComparison.Ordinal)
+                            ? string.Empty
+                            : "|key=" + key)
                     + "|index=" + index.ToString(CultureInfo.InvariantCulture);
             }
 
@@ -15908,6 +15973,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private const float ReplicationWorldObjectDeltaRetrySeconds = 0.75f;
         private const float ReplicationBuildingStateSnapshotRetrySeconds = 3.0f;
         private const float ReplicationBuildingDurableRetrySeconds = 5.0f;
+        private const float ReplicationWorkerScheduleStateDurableRetrySeconds = 5.0f;
         private const int ReplicationWorldObjectDeltaMaxSends = 5;
         private const int ReplicationBuildBatchWorldObjectDeltaMaxSends = 20;
         private const int ReplicationClientAppliedWorldObjectDeltaSequenceRetention = 65536;

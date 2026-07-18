@@ -147,6 +147,19 @@ namespace GoingCooperative.Plugin.BepInEx
                 return TryApplyReplicationCombatCancel(cancellingEntityIds, authoritativeExecution: true, out detail);
             }
 
+            if (LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(
+                payloadJson,
+                out var scheduleTargetId,
+                out var scheduleHours,
+                out var scheduleHourTypes))
+            {
+                return TryApplyReplicationWorkerScheduleUpdate(
+                    scheduleTargetId,
+                    scheduleHours,
+                    scheduleHourTypes,
+                    out detail);
+            }
+
             if (LockstepCommandPayloads.TryReadManagementPolicyPayload(payloadJson, out var policy, out var targetId, out var key, out var index, out var policyValue, out var policyEnabled))
             {
                 return TryApplyReplicationManagementPolicy(policy, targetId, key, index, policyValue, policyEnabled, out detail);

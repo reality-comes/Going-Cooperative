@@ -18,6 +18,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationRuntimeStartAttempted;
         private static bool replicationRemoteHelloReceived;
         private static bool replicationRemoteCompatibilityRefused;
+        private static float replicationLastRemoteHelloRealtime;
         private static string replicationLocalBuildHash = string.Empty;
         private static string replicationGameAssemblyModuleVersionId = string.Empty;
         private static float replicationNextHelloRealtime;
@@ -26,6 +27,8 @@ namespace GoingCooperative.Plugin.BepInEx
         private static float replicationNextPumpExceptionWarnRealtime;
         private static float replicationNextTransportDropWarnRealtime;
         private static long replicationPumpHandlerExceptions;
+        private static readonly Queue<TransportEnvelope> ReplicationDeferredPreHelloEnvelopes =
+            new Queue<TransportEnvelope>();
         private static long replicationLastTransportDecodeFailures;
         private static long replicationLastTransportChunkFailures;
         private static float replicationNextSnapshotRealtime;
@@ -113,6 +116,9 @@ namespace GoingCooperative.Plugin.BepInEx
         private const int ReplicationRegionOrderMarkerSnapshotMaxStates = 64;
         private const int ReplicationHostCommandResultRetention = 8192;
         private const int ReplicationBuildingDurableBackpressureLimit = 16;
+        private const int ReplicationDeferredPreHelloEnvelopeLimit = 256;
+        private const float ReplicationRemoteHelloFreshSeconds = 3f;
+        private const string ReplicationManagementWireVersion = "2";
 
         private void TryStartReplicationRuntime()
         {
@@ -247,6 +253,8 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationRuntimeStartAttempted = false;
             replicationRemoteHelloReceived = false;
             replicationRemoteCompatibilityRefused = false;
+            replicationLastRemoteHelloRealtime = 0f;
+            ReplicationDeferredPreHelloEnvelopes.Clear();
             replicationLocalBuildHash = string.Empty;
             ResetReplicationCombatRuntimeState();
             ResetReplicationEventRuntimeState(traderPartyResetContext);
@@ -324,6 +332,9 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationLastRegionOrderStateRealtime = 0f;
             replicationRegionOrderStateCaptureSuppressionDepth = 0;
             replicationWorkerManageAuthoritativeApplyDepth = 0;
+            replicationWorkerScheduleAuthoritativeApplyDepth = 0;
+            replicationApplyingRemoteManagementCommandSequence = 0L;
+            ReplicationHostWorkerScheduleIntentSequenceByHour.Clear();
             replicationLastHostManagementMutationPayload = string.Empty;
             replicationLastHostManagementMutationRealtime = 0f;
             ReplicationRecentRegionOrderMarkerStates.Clear();
@@ -426,8 +437,39 @@ namespace GoingCooperative.Plugin.BepInEx
 
             while (replicationTransport.TryReceive(out var envelope))
             {
-                try
+                if (envelope.Kind == TransportMessageKind.ReplicationHello)
                 {
+                    DispatchReplicationEnvelope(envelope);
+                    if (replicationRemoteHelloReceived && !replicationRemoteCompatibilityRefused)
+                    {
+                        DrainReplicationDeferredPreHelloEnvelopes();
+                    }
+                    continue;
+                }
+
+                if (!replicationRemoteHelloReceived || replicationRemoteCompatibilityRefused)
+                {
+                    if (!replicationConfigHostMode
+                        && !replicationRemoteCompatibilityRefused
+                        && IsReplicationDeferredPreHelloEnvelope(envelope.Kind))
+                    {
+                        if (ReplicationDeferredPreHelloEnvelopes.Count >= ReplicationDeferredPreHelloEnvelopeLimit)
+                        {
+                            ReplicationDeferredPreHelloEnvelopes.Dequeue();
+                        }
+                        ReplicationDeferredPreHelloEnvelopes.Enqueue(envelope);
+                    }
+                    continue;
+                }
+
+                DispatchReplicationEnvelope(envelope);
+            }
+        }
+
+        private void DispatchReplicationEnvelope(TransportEnvelope envelope)
+        {
+            try
+            {
                 switch (envelope.Kind)
                 {
                     case TransportMessageKind.ReplicationHello:
@@ -458,26 +500,44 @@ namespace GoingCooperative.Plugin.BepInEx
                         HandleReplicationResourceContainerBatch(envelope);
                         break;
                 }
-                }
-                catch (Exception ex)
+            }
+            catch (Exception ex)
+            {
+                // One bad message must not abort the remaining receives this frame -
+                // that pattern silently starves later channels and looks like packet loss.
+                replicationPumpHandlerExceptions++;
+                if (Time.realtimeSinceStartup >= replicationNextPumpExceptionWarnRealtime)
                 {
-                    // One bad message must not abort the remaining receives this frame -
-                    // that pattern silently starves later channels and looks like packet loss.
-                    replicationPumpHandlerExceptions++;
-                    if (Time.realtimeSinceStartup >= replicationNextPumpExceptionWarnRealtime)
-                    {
-                        replicationNextPumpExceptionWarnRealtime = Time.realtimeSinceStartup + 10f;
-                        LogReplicationWarning("Going Cooperative replication pump handler threw kind="
-                            + envelope.Kind
-                            + " total="
-                            + replicationPumpHandlerExceptions.ToString(CultureInfo.InvariantCulture)
-                            + " error="
-                            + ex.GetType().Name
-                            + ":"
-                            + ex.Message);
-                    }
+                    replicationNextPumpExceptionWarnRealtime = Time.realtimeSinceStartup + 10f;
+                    LogReplicationWarning("Going Cooperative replication pump handler threw kind="
+                        + envelope.Kind
+                        + " total="
+                        + replicationPumpHandlerExceptions.ToString(CultureInfo.InvariantCulture)
+                        + " error="
+                        + ex.GetType().Name
+                        + ":"
+                        + ex.Message);
                 }
             }
+        }
+
+        private void DrainReplicationDeferredPreHelloEnvelopes()
+        {
+            while (ReplicationDeferredPreHelloEnvelopes.Count > 0
+                && replicationRemoteHelloReceived
+                && !replicationRemoteCompatibilityRefused)
+            {
+                DispatchReplicationEnvelope(ReplicationDeferredPreHelloEnvelopes.Dequeue());
+            }
+        }
+
+        private static bool IsReplicationDeferredPreHelloEnvelope(TransportMessageKind kind)
+        {
+            return kind == TransportMessageKind.ReplicationTransformSnapshot
+                || kind == TransportMessageKind.ReplicationRegionOrderState
+                || kind == TransportMessageKind.ReplicationWorldObjectDelta
+                || kind == TransportMessageKind.ReplicationResyncControl
+                || kind == TransportMessageKind.ReplicationResourceContainerBatch;
         }
 
         private void SendReplicationHelloIfDue()
@@ -519,6 +579,8 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 replicationRemoteHelloReceived = false;
                 replicationRemoteCompatibilityRefused = true;
+                replicationLastRemoteHelloRealtime = 0f;
+                ReplicationDeferredPreHelloEnvelopes.Clear();
                 LogReplicationWarning("Going Cooperative replication hello refused peer="
                     + hello.PeerId
                     + " mode="
@@ -539,6 +601,7 @@ namespace GoingCooperative.Plugin.BepInEx
             var firstCompatibleHello = !replicationRemoteHelloReceived;
             replicationRemoteCompatibilityRefused = false;
             replicationRemoteHelloReceived = true;
+            replicationLastRemoteHelloRealtime = Time.realtimeSinceStartup;
             if (firstCompatibleHello)
             {
                 replicationNextAnimalAppearanceSnapshotRealtime = 0f;
@@ -570,6 +633,29 @@ namespace GoingCooperative.Plugin.BepInEx
             if (!string.Equals(hello.ProtocolVersion, ReplicationPayloadCodec.ProtocolVersion, StringComparison.Ordinal))
             {
                 error = "protocol-version-mismatch";
+                return false;
+            }
+
+            var localBuildHashForManagement = GetReplicationLocalBuildHash();
+            var localHasManagementCapability = TryReadReplicationCapabilitySegment(
+                localBuildHashForManagement,
+                "management",
+                out var localManagementWireVersion);
+            var remoteHasManagementCapability = TryReadReplicationCapabilitySegment(
+                hello.BuildHash,
+                "management",
+                out var remoteManagementWireVersion);
+            if (!localHasManagementCapability
+                || !remoteHasManagementCapability
+                || !string.Equals(
+                    localManagementWireVersion,
+                    remoteManagementWireVersion,
+                    StringComparison.Ordinal))
+            {
+                error = "management-capability-mismatch local="
+                    + (localHasManagementCapability ? localManagementWireVersion : "missing")
+                    + " remote="
+                    + (remoteHasManagementCapability ? remoteManagementWireVersion : "legacy");
                 return false;
             }
 
@@ -760,6 +846,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 + FormatReplicationCombatCapabilityFingerprint()
                 + "|events="
                 + FormatReplicationEventCapabilityFingerprint()
+                + "|management="
+                + ReplicationManagementWireVersion
                 + "|gameasm="
                 + GetReplicationGameAssemblyModuleVersionId();
         }
@@ -1256,6 +1344,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
+            if (!replicationRemoteHelloReceived || replicationRemoteCompatibilityRefused)
+            {
+                replicationLastIntentSummary = "ignored-incompatible-or-prehello "
+                    + FormatRuntimeCommandSummary(command);
+                return;
+            }
+
             if (command.Kind == CommandKind.Build
                 && LockstepCommandPayloads.TryReadBuildBatchPayload(
                     command.PayloadJson,
@@ -1283,6 +1378,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 replicationLastIntentSummary = "host-duplicate " + FormatRuntimeCommandSummary(command);
                 SendReplicationCommandAck(command, originalResult.Invoked, duplicate: true, detail: originalResult.Detail);
                 ResendReplicationBuildBatchResult(command, originalRecord.BuildBatchCommitManifest);
+                if (IsReplicationWorkerScheduleUpdateCommand(command))
+                {
+                    // A schedule command ACK proves host receipt, not that the
+                    // authoritative full-row correction reached the client. A retry
+                    // therefore asks the host to emit that state proof again.
+                    SendReplicationManagementStateIfSupported(command, originalResult);
+                }
                 LogReplicationInfo("Going Cooperative replication intent duplicate ignored "
                     + FormatRuntimeCommandSummary(command));
                 return;
@@ -1309,6 +1411,7 @@ namespace GoingCooperative.Plugin.BepInEx
             else
             {
                 BeginReplicationRegionOrderStateCaptureSuppression();
+                replicationApplyingRemoteManagementCommandSequence = command.Sequence;
                 try
                 {
                     result = ApplyRuntimeCommand(this, command);
@@ -1330,6 +1433,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 }
                 finally
                 {
+                    replicationApplyingRemoteManagementCommandSequence = 0L;
                     EndReplicationRegionOrderStateCaptureSuppression();
                 }
             }
@@ -1398,14 +1502,15 @@ namespace GoingCooperative.Plugin.BepInEx
             var pendingCommandKey = ack.PlayerId + ":" + ack.Sequence.ToString(CultureInfo.InvariantCulture);
             ReplicationPendingCommandIntents.TryGetValue(pendingCommandKey, out var pendingCommand);
             var pendingBuildBatch = pendingCommand != null && IsReplicationBuildBatchCommand(pendingCommand.Command);
-            if (pendingBuildBatch)
+            var pendingWorkerSchedule = pendingCommand != null
+                && IsReplicationWorkerScheduleUpdateCommand(pendingCommand.Command);
+            if (pendingBuildBatch || pendingWorkerSchedule)
             {
                 // The command ACK is transaction-level receipt state; the durable result
-                // manifest owns per-item canonical truth for both accepted and rejected
-                // batches. Do not discard provisional views on a negative ACK before the
-                // all-zero/partial/recovery manifest arrives.
+                // manifest/full schedule state owns canonical truth. Do not discard provisional views on a negative ACK,
+                // or optimistic schedule state, before that authoritative proof arrives.
                 pendingCommand!.MarkHostResponded(ack.Accepted, Time.realtimeSinceStartup);
-                if (ack.Detail.IndexOf(
+                if (pendingBuildBatch && ack.Detail.IndexOf(
                     "building-v2-backpressure-recovery-required",
                     StringComparison.OrdinalIgnoreCase) >= 0)
                 {

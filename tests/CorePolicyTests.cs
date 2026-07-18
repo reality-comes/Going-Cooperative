@@ -244,6 +244,29 @@ internal static class CorePolicyTests
         var policy = LockstepCommandPayloads.CreateManagementPolicyPayload("WorkerSchedule", "uid:-3", "Sleep", 7, 2, true);
         Equal(true, LockstepCommandPayloads.TryReadManagementPolicyPayload(policy, out var policyKind, out var targetId, out var policyKey, out var policyIndex, out var policyValue, out var policyEnabled), "management policy parses");
         Equal("WorkerSchedule", policyKind, "management policy kind");
+        Equal("Sleep", policyKey, "management schedule hour type");
+        var scheduleUpdate = LockstepCommandPayloads.CreateWorkerScheduleUpdatePayload(
+            "uid:schedule-7",
+            new[] { 2, 6, 11 },
+            new[] { 1, 8, 3 });
+        Equal(true, LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(scheduleUpdate, out var scheduleUpdateTarget, out var updatedHours, out var updatedHourTypes), "worker schedule update parses");
+        Equal("uid:schedule-7", scheduleUpdateTarget, "worker schedule update target");
+        Equal(3, updatedHours.Length, "worker schedule update count");
+        Equal(6, updatedHours[1], "worker schedule update hour roundtrip");
+        Equal(8, updatedHourTypes[1], "worker schedule update type roundtrip");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(LockstepCommandPayloads.CreateWorkerScheduleUpdatePayload("uid:7", new[] { 1 }, Array.Empty<int>()), out _, out _, out _), "worker schedule update rejects mismatched arrays");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(scheduleUpdate.Replace("6:8", "2:8"), out _, out _, out _), "worker schedule update rejects duplicate hours");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleUpdatePayload(scheduleUpdate.Replace("6:8", "99:8"), out _, out _, out _), "worker schedule update rejects excessive hour index");
+        var scheduleHours = new[] { 0, 0, 1, 1, 2, 3, 8, 0 };
+        var scheduleState = LockstepCommandPayloads.CreateWorkerScheduleStatePayload("uid:schedule-7", scheduleHours);
+        Equal(true, LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(scheduleState, out var scheduleTarget, out var parsedScheduleHours), "worker schedule state parses");
+        Equal("uid:schedule-7", scheduleTarget, "worker schedule state target");
+        Equal(scheduleHours.Length, parsedScheduleHours.Length, "worker schedule state hour count");
+        Equal(8, parsedScheduleHours[6], "worker schedule state value roundtrip");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(LockstepCommandPayloads.CreateWorkerScheduleStatePayload(string.Empty, scheduleHours), out _, out _), "worker schedule state rejects empty target");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(LockstepCommandPayloads.CreateWorkerScheduleStatePayload("uid:7", Array.Empty<int>()), out _, out _), "worker schedule state rejects empty hours");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(LockstepCommandPayloads.CreateWorkerScheduleStatePayload("uid:7", new int[LockstepCommandPayloads.MaximumWorkerScheduleHours + 1]), out _, out _), "worker schedule state rejects excessive hours");
+        Equal(false, LockstepCommandPayloads.TryReadWorkerScheduleStatePayload(scheduleState.Replace("0,0,1", "0,nope,1"), out _, out _), "worker schedule state rejects malformed hour value");
         var hunt = LockstepCommandPayloads.CreateManagementPolicyPayload("AnimalOrder", "uid:42", "Hunt", 0, 1, true);
         Equal(true, LockstepCommandPayloads.TryReadManagementPolicyPayload(hunt, out var huntPolicy, out var huntTarget, out var huntOrder, out _, out var huntValue, out _), "hunt payload parses");
         Equal("AnimalOrder", huntPolicy, "hunt policy kind");

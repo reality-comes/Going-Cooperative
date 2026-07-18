@@ -25,6 +25,9 @@ namespace GoingCooperative.Core
         public const string ResearchActivateAction = "ResearchActivate";
         public const string ProductionQueueAction = "ProductionQueue";
         public const string ManagementPolicyAction = "ManagementPolicy";
+        public const string WorkerScheduleUpdateAction = "WorkerScheduleUpdate";
+        public const string WorkerScheduleStateAction = "WorkerScheduleState";
+        public const int MaximumWorkerScheduleHours = 48;
         public const string WorkerManagePresetAction = "WorkerManagePreset";
         public const string DraftStateAction = "DraftState";
         public const string DraftMoveAction = "DraftMove";
@@ -421,6 +424,133 @@ namespace GoingCooperative.Core
                 && TryReadIntProperty(normalized, "index", out index)
                 && TryReadIntProperty(normalized, "value", out value)
                 && TryReadBoolProperty(normalized, "enabled", out enabled);
+        }
+
+        public static string CreateWorkerScheduleUpdatePayload(
+            string targetId,
+            int[] hours,
+            int[] hourTypes)
+        {
+            var indices = hours ?? Array.Empty<int>();
+            var values = hourTypes ?? Array.Empty<int>();
+            var changes = new StringBuilder();
+            var count = indices.Length == values.Length ? indices.Length : 0;
+            for (var i = 0; i < count; i++)
+            {
+                if (i > 0)
+                {
+                    changes.Append(',');
+                }
+                changes.Append(indices[i].ToString(CultureInfo.InvariantCulture));
+                changes.Append(':');
+                changes.Append(values[i].ToString(CultureInfo.InvariantCulture));
+            }
+
+            return "{\"action\":\"" + WorkerScheduleUpdateAction
+                + "\",\"targetId\":\"" + EscapeJsonString(targetId)
+                + "\",\"changes\":\"" + changes + "\"}";
+        }
+
+        public static bool TryReadWorkerScheduleUpdatePayload(
+            string payloadJson,
+            out string targetId,
+            out int[] hours,
+            out int[] hourTypes)
+        {
+            var normalized = Normalize(payloadJson);
+            targetId = string.Empty;
+            hours = Array.Empty<int>();
+            hourTypes = Array.Empty<int>();
+            if (!HasAction(normalized, WorkerScheduleUpdateAction)
+                || !TryReadStringProperty(normalized, "targetId", out targetId)
+                || string.IsNullOrWhiteSpace(targetId)
+                || !TryReadStringProperty(normalized, "changes", out var encoded)
+                || string.IsNullOrWhiteSpace(encoded))
+            {
+                return false;
+            }
+
+            var parts = encoded.Split(new[] { ',' }, StringSplitOptions.None);
+            if (parts.Length == 0 || parts.Length > MaximumWorkerScheduleHours)
+            {
+                return false;
+            }
+
+            var parsedHours = new int[parts.Length];
+            var parsedTypes = new int[parts.Length];
+            var seenHours = new HashSet<int>();
+            for (var i = 0; i < parts.Length; i++)
+            {
+                var separator = parts[i].IndexOf(':');
+                if (separator <= 0
+                    || separator >= parts[i].Length - 1
+                    || !int.TryParse(parts[i].Substring(0, separator), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedHours[i])
+                    || !int.TryParse(parts[i].Substring(separator + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedTypes[i])
+                    || parsedHours[i] < 0
+                    || parsedHours[i] >= MaximumWorkerScheduleHours
+                    || !seenHours.Add(parsedHours[i]))
+                {
+                    return false;
+                }
+            }
+
+            hours = parsedHours;
+            hourTypes = parsedTypes;
+            return true;
+        }
+
+        public static string CreateWorkerScheduleStatePayload(string targetId, int[] hourTypes)
+        {
+            var values = hourTypes ?? Array.Empty<int>();
+            var hours = new StringBuilder();
+            for (var i = 0; i < values.Length; i++)
+            {
+                if (i > 0)
+                {
+                    hours.Append(',');
+                }
+                hours.Append(values[i].ToString(CultureInfo.InvariantCulture));
+            }
+
+            return "{\"action\":\"" + WorkerScheduleStateAction
+                + "\",\"targetId\":\"" + EscapeJsonString(targetId)
+                + "\",\"hourTypes\":\"" + hours + "\"}";
+        }
+
+        public static bool TryReadWorkerScheduleStatePayload(
+            string payloadJson,
+            out string targetId,
+            out int[] hourTypes)
+        {
+            var normalized = Normalize(payloadJson);
+            targetId = string.Empty;
+            hourTypes = Array.Empty<int>();
+            if (!HasAction(normalized, WorkerScheduleStateAction)
+                || !TryReadStringProperty(normalized, "targetId", out targetId)
+                || string.IsNullOrWhiteSpace(targetId)
+                || !TryReadStringProperty(normalized, "hourTypes", out var encoded)
+                || string.IsNullOrWhiteSpace(encoded))
+            {
+                return false;
+            }
+
+            var parts = encoded.Split(new[] { ',' }, StringSplitOptions.None);
+            if (parts.Length == 0 || parts.Length > MaximumWorkerScheduleHours)
+            {
+                return false;
+            }
+
+            var parsed = new int[parts.Length];
+            for (var i = 0; i < parts.Length; i++)
+            {
+                if (!int.TryParse(parts[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed[i]))
+                {
+                    return false;
+                }
+            }
+
+            hourTypes = parsed;
+            return true;
         }
 
         public static string CreateWorkerManagePresetPayload(
