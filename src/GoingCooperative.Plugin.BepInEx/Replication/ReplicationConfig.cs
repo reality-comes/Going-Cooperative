@@ -61,6 +61,9 @@ namespace GoingCooperative.Plugin.BepInEx
         // Transactional placement plus sparse lifecycle replication. False restores
         // the legacy periodic full-building snapshot lane for rollback testing.
         private static bool replicationConfigBuildingReplicationV2 = true;
+        // Authoritative BaseBuildingInstance.Storage replication for unfinished
+        // construction. This remains independent from workstation containers.
+        private static bool replicationConfigBuildingConstructionMaterialsV2;
         // Exact native semantic placement lanes. Each remains independently
         // reversible; disabled categories continue through the fail-closed rollback.
         private static bool replicationConfigBeamPlacementReplication;
@@ -274,6 +277,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigVerboseReplicationLogging
                     + " buildingReplicationV2="
                     + replicationConfigBuildingReplicationV2
+                    + " buildingConstructionMaterialsV2="
+                    + replicationConfigBuildingConstructionMaterialsV2
                     + " beamPlacementReplication="
                     + replicationConfigBeamPlacementReplication
                     + " beamLifecycleReplication="
@@ -1036,6 +1041,18 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryParseConfigBool(value, out var buildingReplicationV2))
                     {
                         replicationConfigBuildingReplicationV2 = buildingReplicationV2;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "buildingconstructionmaterialsv2":
+                case "constructionmaterialsv2":
+                    if (TryParseConfigBool(value, out var buildingConstructionMaterialsV2))
+                    {
+                        replicationConfigBuildingConstructionMaterialsV2 = buildingConstructionMaterialsV2;
                     }
                     else
                     {

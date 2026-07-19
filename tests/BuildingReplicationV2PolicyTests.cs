@@ -133,11 +133,13 @@ internal static class BuildingReplicationV2PolicyTests
         var v2 = new BuildingReplicationCapability(
             BuildingReplicationMode.TransactionLifecycleV2,
             BuildingReplicationCapability.CurrentTransactionSchemaVersion,
-            true);
+            true,
+            constructionMaterialsV2: true);
         var v2Peer = new BuildingReplicationCapability(
             BuildingReplicationMode.TransactionLifecycleV2,
             BuildingReplicationCapability.CurrentTransactionSchemaVersion,
-            false);
+            false,
+            constructionMaterialsV2: true);
         var decision = BuildingReplicationCompatibilityPolicy.Evaluate(v2, v2Peer);
         Equal(true, decision.IsCompatible, "matching V2 schema connects");
         Equal(BuildingReplicationMode.TransactionLifecycleV2, decision.SelectedMode, "V2 remains selected");
@@ -150,6 +152,16 @@ internal static class BuildingReplicationV2PolicyTests
             BuildingReplicationCompatibilityDisposition.TransactionSchemaMismatch,
             BuildingReplicationCompatibilityPolicy.Evaluate(v2, futureSchema).Disposition,
             "unknown building transaction schema fails closed");
+
+        var materialsDisabled = new BuildingReplicationCapability(
+            BuildingReplicationMode.TransactionLifecycleV2,
+            BuildingReplicationCapability.CurrentTransactionSchemaVersion,
+            true,
+            constructionMaterialsV2: false);
+        Equal(
+            BuildingReplicationCompatibilityDisposition.ConstructionMaterialsMismatch,
+            BuildingReplicationCompatibilityPolicy.Evaluate(v2, materialsDisabled).Disposition,
+            "construction-material authority mismatch fails closed");
 
         var legacy = new BuildingReplicationCapability(
             BuildingReplicationMode.LegacySnapshots,
@@ -179,16 +191,19 @@ internal static class BuildingReplicationV2PolicyTests
         var expected = new BuildingReplicationCapability(
             BuildingReplicationMode.TransactionLifecycleV2,
             BuildingReplicationCapability.CurrentTransactionSchemaVersion,
-            true);
+            true,
+            constructionMaterialsV2: true);
         Equal(true, BuildingReplicationCapability.TryParseWireToken(expected.ToWireToken(), out var parsed), "capability token parses");
         Equal(expected.SelectedMode, parsed.SelectedMode, "capability mode roundtrips");
         Equal(expected.TransactionSchemaVersion, parsed.TransactionSchemaVersion, "capability schema roundtrips");
         Equal(expected.LegacyRollbackSupported, parsed.LegacyRollbackSupported, "rollback support roundtrips");
+        Equal(expected.ConstructionMaterialsV2, parsed.ConstructionMaterialsV2, "construction-material support roundtrips");
         Equal(false, BuildingReplicationCapability.TryParseWireToken(null, out _), "missing capability is rejected");
         Equal(false, BuildingReplicationCapability.TryParseWireToken("building-replication-v2:2:1", out _), "truncated capability is rejected");
-        Equal(false, BuildingReplicationCapability.TryParseWireToken("building-replication-v2:02:1:1", out _), "noncanonical mode number is rejected");
-        Equal(false, BuildingReplicationCapability.TryParseWireToken("building-replication-v2:2:1:yes", out _), "noncanonical rollback bit is rejected");
-        Equal(false, BuildingReplicationCapability.TryParseWireToken("building-replication-v1:2:1:1", out _), "old capability prefix is rejected");
+        Equal(false, BuildingReplicationCapability.TryParseWireToken("building-replication-v2:02:1:1:1", out _), "noncanonical mode number is rejected");
+        Equal(false, BuildingReplicationCapability.TryParseWireToken("building-replication-v2:2:1:yes:1", out _), "noncanonical rollback bit is rejected");
+        Equal(false, BuildingReplicationCapability.TryParseWireToken("building-replication-v2:2:1:1:yes", out _), "noncanonical construction-material bit is rejected");
+        Equal(false, BuildingReplicationCapability.TryParseWireToken("building-replication-v1:2:1:1:1", out _), "old capability prefix is rejected");
     }
 
     private static void Equal<T>(T expected, T actual, string name)

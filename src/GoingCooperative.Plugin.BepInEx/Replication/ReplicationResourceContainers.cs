@@ -190,7 +190,9 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void HandleReplicationResourceContainerBatch(TransportEnvelope envelope)
         {
-            if (replicationConfigHostMode || !replicationConfigResourceContainerReplication)
+            if (replicationConfigHostMode
+                || (!replicationConfigResourceContainerReplication
+                    && !replicationConfigBuildingConstructionMaterialsV2))
             {
                 return;
             }
@@ -223,7 +225,9 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static void ProcessPendingReplicationResourceContainerApplies()
         {
-            if (!replicationConfigResourceContainerReplication || replicationConfigHostMode)
+            if (replicationConfigHostMode
+                || (!replicationConfigResourceContainerReplication
+                    && !replicationConfigBuildingConstructionMaterialsV2))
             {
                 return;
             }
@@ -551,6 +555,20 @@ namespace GoingCooperative.Plugin.BepInEx
             ReplicationResourceContainerState state,
             out string detail)
         {
+            if (string.Equals(
+                    state.ContainerKind,
+                    ReplicationBuildingConstructionMaterialsKindV2,
+                    StringComparison.Ordinal))
+            {
+                return TryApplyReplicationBuildingConstructionMaterialsV2(state, out detail);
+            }
+
+            if (!replicationConfigResourceContainerReplication)
+            {
+                detail = "resource-container-kind-gated-off kind=" + state.ContainerKind;
+                return true;
+            }
+
             if (string.Equals(state.ContainerKind, "pile", StringComparison.Ordinal))
             {
                 return TryApplyReplicationPileContainer(state, out detail);

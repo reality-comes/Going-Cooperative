@@ -2028,6 +2028,7 @@ namespace GoingCooperative.Plugin.BepInEx
             // Retain terminal topology until the exact terminal row/repair is known
             // applied. Afterwards it is dead state and would otherwise grow forever.
             ReplicationTrackedHostBuildingsV2.Remove(acknowledgedDelta.UniqueId);
+            RetireReplicationBuildingConstructionMaterialsV2(acknowledgedDelta.UniqueId);
             ReplicationBuildingRepairLastSentRealtimeV2.Remove(acknowledgedDelta.UniqueId);
         }
 
@@ -2269,6 +2270,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
+            UpdateReplicationBuildingConstructionMaterialsV2();
+
             if (!replicationConfigHostMode)
             {
                 EnsureReplicationBuildingIdentityBootstrapV2();
@@ -2506,6 +2509,7 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static void ResetReplicationBuildingLifecycleV2()
         {
+            ResetReplicationBuildingConstructionMaterialsV2();
             ReplicationTrackedHostBuildingsV2.Clear();
             ReplicationClientBuildingProgressingV2.Clear();
             ReplicationClientBuildingTerminalRevisionV2.Clear();
@@ -2559,6 +2563,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 + ReplicationClientBuildingPresentationByHostIdV2.Count.ToString(CultureInfo.InvariantCulture)
                 + " presentationApplies="
                 + replicationClientBuildingPresentationAppliesV2.ToString(CultureInfo.InvariantCulture)
+                + FormatReplicationBuildingConstructionMaterialsV2Status()
                 + " selectedHostId="
                 + replicationClientSelectedBuildingHostIdV2.ToString(CultureInfo.InvariantCulture);
         }

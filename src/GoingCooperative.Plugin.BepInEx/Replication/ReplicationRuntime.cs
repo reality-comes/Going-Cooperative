@@ -812,7 +812,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     ? BuildingReplicationMode.TransactionLifecycleV2
                     : BuildingReplicationMode.LegacySnapshots,
                 BuildingReplicationCapability.CurrentTransactionSchemaVersion,
-                legacyRollbackSupported: true);
+                legacyRollbackSupported: true,
+                constructionMaterialsV2: replicationConfigBuildingConstructionMaterialsV2);
         }
 
         private static bool TryReadReplicationAgentPresentationCapability(

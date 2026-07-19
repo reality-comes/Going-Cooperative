@@ -434,7 +434,8 @@ namespace GoingCooperative.Core
         public BuildingReplicationCapability(
             BuildingReplicationMode selectedMode,
             int transactionSchemaVersion,
-            bool legacyRollbackSupported)
+            bool legacyRollbackSupported,
+            bool constructionMaterialsV2 = false)
         {
             if (!Enum.IsDefined(typeof(BuildingReplicationMode), selectedMode))
             {
@@ -449,6 +450,7 @@ namespace GoingCooperative.Core
             SelectedMode = selectedMode;
             TransactionSchemaVersion = transactionSchemaVersion;
             LegacyRollbackSupported = legacyRollbackSupported;
+            ConstructionMaterialsV2 = constructionMaterialsV2;
         }
 
         public BuildingReplicationMode SelectedMode { get; }
@@ -456,6 +458,8 @@ namespace GoingCooperative.Core
         public int TransactionSchemaVersion { get; }
 
         public bool LegacyRollbackSupported { get; }
+
+        public bool ConstructionMaterialsV2 { get; }
 
         public string ToWireToken()
         {
@@ -465,7 +469,9 @@ namespace GoingCooperative.Core
                 + ":"
                 + TransactionSchemaVersion.ToString(CultureInfo.InvariantCulture)
                 + ":"
-                + (LegacyRollbackSupported ? "1" : "0");
+                + (LegacyRollbackSupported ? "1" : "0")
+                + ":"
+                + (ConstructionMaterialsV2 ? "1" : "0");
         }
 
         public static bool TryParseWireToken(
@@ -479,13 +485,14 @@ namespace GoingCooperative.Core
             }
 
             var parts = token!.Split(new[] { ':' }, StringSplitOptions.None);
-            if (parts.Length != 4
+            if (parts.Length != 5
                 || !string.Equals(parts[0], WirePrefix, StringComparison.Ordinal)
                 || !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var modeValue)
                 || !Enum.IsDefined(typeof(BuildingReplicationMode), modeValue)
                 || !int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var schemaVersion)
                 || schemaVersion < 0
-                || (parts[3] != "0" && parts[3] != "1"))
+                || (parts[3] != "0" && parts[3] != "1")
+                || (parts[4] != "0" && parts[4] != "1"))
             {
                 return false;
             }
@@ -493,7 +500,8 @@ namespace GoingCooperative.Core
             var parsed = new BuildingReplicationCapability(
                 (BuildingReplicationMode)modeValue,
                 schemaVersion,
-                parts[3] == "1");
+                parts[3] == "1",
+                parts[4] == "1");
             if (!string.Equals(parsed.ToWireToken(), token, StringComparison.Ordinal))
             {
                 return false;
@@ -509,7 +517,8 @@ namespace GoingCooperative.Core
         Compatible = 0,
         SelectedModeMismatch = 1,
         TransactionSchemaMismatch = 2,
-        LegacyRollbackUnavailable = 3
+        LegacyRollbackUnavailable = 3,
+        ConstructionMaterialsMismatch = 4
     }
 
     public readonly struct BuildingReplicationCompatibilityDecision
@@ -557,6 +566,13 @@ namespace GoingCooperative.Core
                 {
                     return new BuildingReplicationCompatibilityDecision(
                         BuildingReplicationCompatibilityDisposition.TransactionSchemaMismatch,
+                        local.SelectedMode);
+                }
+
+                if (local.ConstructionMaterialsV2 != remote.ConstructionMaterialsV2)
+                {
+                    return new BuildingReplicationCompatibilityDecision(
+                        BuildingReplicationCompatibilityDisposition.ConstructionMaterialsMismatch,
                         local.SelectedMode);
                 }
 
