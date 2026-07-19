@@ -532,6 +532,13 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             __state = LockstepCommandPayloads.CreateProductionQueuePayload("Remove", x, y, z, index, blueprintId, 0);
+            if (replicationConfigProductionStateV2
+                && replicationConfigProductionTicketOrdersV2
+                && TryGetReplicationProductionTicketIdV2(__0, out var ticketId))
+            {
+                __state = LockstepCommandPayloads.CreateProductionQueueV2Payload(
+                    "Remove", ticketId, x, y, z, index, blueprintId, 0);
+            }
         }
 
         private static void ReplicationProductionRemovalPostfix(string? __state)
@@ -593,6 +600,7 @@ namespace GoingCooperative.Plugin.BepInEx
             if (result.Invoked && command.Kind == CommandKind.Custom
                 && (LockstepCommandPayloads.TryReadResearchActivatePayload(command.PayloadJson, out _)
                     || LockstepCommandPayloads.TryReadProductionQueuePayload(command.PayloadJson, out _, out _, out _, out _, out _, out _, out _)
+                    || LockstepCommandPayloads.TryReadProductionQueueV2Payload(command.PayloadJson, out _, out _, out _, out _, out _, out _, out _, out _)
                     || LockstepCommandPayloads.TryReadWorkerManagePresetPayload(command.PayloadJson, out _, out _, out _, out _)
                     || LockstepCommandPayloads.TryReadManagementPolicyPayload(command.PayloadJson, out _, out _, out _, out _, out _, out _)))
             {
@@ -624,6 +632,22 @@ namespace GoingCooperative.Plugin.BepInEx
                     out var value))
                 {
                     return TryApplyReplicationProductionQueue(operation, buildingX, buildingY, buildingZ, ticketIndex, blueprintId, value, out detail);
+                }
+
+                if (LockstepCommandPayloads.TryReadProductionQueueV2Payload(
+                    delta.Detail,
+                    out var operationV2,
+                    out var ticketIdV2,
+                    out var buildingXV2,
+                    out var buildingYV2,
+                    out var buildingZV2,
+                    out var ticketIndexV2,
+                    out var blueprintIdV2,
+                    out var valueV2))
+                {
+                    return TryApplyReplicationProductionQueueV2(
+                        operationV2, ticketIdV2, buildingXV2, buildingYV2, buildingZV2,
+                        ticketIndexV2, blueprintIdV2, valueV2, out detail);
                 }
 
                 if (LockstepCommandPayloads.TryReadWorkerManagePresetPayload(
@@ -1600,6 +1624,84 @@ namespace GoingCooperative.Plugin.BepInEx
             return true;
         }
 
+        private static bool TryApplyReplicationProductionQueueV2(
+            string operation,
+            long ticketId,
+            int x,
+            int y,
+            int z,
+            int ticketIndex,
+            string blueprintId,
+            int value,
+            out string detail)
+        {
+            if (!replicationConfigProductionStateV2 || !replicationConfigProductionTicketOrdersV2)
+            {
+                return TryApplyReplicationProductionQueue(operation, x, y, z, ticketIndex, blueprintId, value, out detail);
+            }
+            if (!TryGetReplicationProductionTicketV2(ticketId, out var record) || record == null)
+            {
+                detail = "production-v2-ticket-pending ticketId=" + ticketId.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
+
+            RefreshReplicationProductionIdentityV2(record, sendIfChanged: replicationConfigHostMode);
+            return TryApplyReplicationProductionTicketOperationV2(record, operation, value, out detail);
+        }
+
+        private static bool TryApplyReplicationProductionTicketOperationV2(
+            ReplicationProductionTicketV2 record,
+            string operation,
+            int value,
+            out string detail)
+        {
+            var ticket = record.Ticket;
+            var system = record.System;
+            if (string.Equals(operation, "Remove", StringComparison.Ordinal))
+            {
+                var cancel = AccessTools.Method(ticket.GetType(), "Cancel", Type.EmptyTypes);
+                if (cancel == null) { detail = "production-v2-cancel-method-missing"; return false; }
+                replicationApplyingProductionRemoval = true;
+                try { cancel.Invoke(ticket, null); }
+                finally { replicationApplyingProductionRemoval = false; }
+            }
+            else if (string.Equals(operation, "Move", StringComparison.Ordinal))
+            {
+                var method = AccessTools.Method(system.GetType(), "ChangePriority", new[] { ticket.GetType(), typeof(int) });
+                if (method == null) { detail = "production-v2-move-method-missing"; return false; }
+                method.Invoke(system, new[] { ticket, (object)value });
+            }
+            else if (string.Equals(operation, "SetMode", StringComparison.Ordinal))
+            {
+                var method = AccessTools.Method(ticket.GetType(), "SetMode");
+                var setCount = AccessTools.Method(ticket.GetType(), "SetProductTargetCount", new[] { typeof(int), typeof(bool) });
+                if (method == null || setCount == null) { detail = "production-v2-mode-method-missing"; return false; }
+                setCount.Invoke(ticket, new object[] { CalculateProductionModeTarget(ticket, value), true });
+                method.Invoke(ticket, new[] { Enum.ToObject(method.GetParameters()[0].ParameterType, value), (object)true });
+            }
+            else if (string.Equals(operation, "SetCount", StringComparison.Ordinal))
+            {
+                var method = AccessTools.Method(ticket.GetType(), "SetProductTargetCount", new[] { typeof(int), typeof(bool) });
+                if (method == null) { detail = "production-v2-count-method-missing"; return false; }
+                method.Invoke(ticket, new object[] { Math.Max(0, value), true });
+            }
+            else if (string.Equals(operation, "SetOrder", StringComparison.Ordinal))
+            {
+                var method = AccessTools.Method(ticket.GetType(), "SetOrder");
+                if (method == null) { detail = "production-v2-order-method-missing"; return false; }
+                method.Invoke(ticket, new[] { Enum.ToObject(method.GetParameters()[0].ParameterType, value), (object)true });
+            }
+            else
+            {
+                detail = "production-v2-operation-unsupported operation=" + operation;
+                return false;
+            }
+
+            MarkReplicationProductionTicketDirtyV2(record, progress: true, containers: true);
+            detail = "ok production-v2-" + operation + " ticketId=" + record.HostTicketId.ToString(CultureInfo.InvariantCulture);
+            return true;
+        }
+
         private static bool TryBuildProductionTicketPayload(object view, string methodName, object[] args, out string payload, out string detail)
         {
             payload = string.Empty;
@@ -1630,7 +1732,11 @@ namespace GoingCooperative.Plugin.BepInEx
             else if (methodName == "OnTogglePauseProductionButtonPress") { operation = "SetOrder"; value = ReadEnumMember(ticket, "Order", "order") == 2 ? 1 : 2; }
             else { detail = "unsupported-ui-method=" + methodName; return false; }
 
-            payload = LockstepCommandPayloads.CreateProductionQueuePayload(operation, x, y, z, index, blueprintId, value);
+            payload = replicationConfigProductionStateV2
+                && replicationConfigProductionTicketOrdersV2
+                && TryGetReplicationProductionTicketIdV2(ticket, out var ticketId)
+                    ? LockstepCommandPayloads.CreateProductionQueueV2Payload(operation, ticketId, x, y, z, index, blueprintId, value)
+                    : LockstepCommandPayloads.CreateProductionQueuePayload(operation, x, y, z, index, blueprintId, value);
             detail = "ok";
             return true;
         }
@@ -1661,6 +1767,19 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryFindProductionSystemAtGrid(int x, int y, int z, out object? system, out string detail)
         {
+            if (replicationConfigProductionStateV2)
+            {
+                if (TryFindReplicationProductionSystemV2AtGrid(x, y, z, out system) && system != null)
+                {
+                    detail = "ok production-v2-registry-system-at-grid";
+                    return true;
+                }
+
+                detail = "production-v2-registry-system-pending grid=Vec3Int("
+                    + x + "," + y + "," + z + ")";
+                return false;
+            }
+
             system = null;
             var viewType = AccessTools.TypeByName("NSMedieval.BuildingComponents.BaseBuildingViewComponent");
             if (viewType == null) { detail = "building-view-type-missing"; return false; }

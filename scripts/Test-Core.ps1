@@ -60,7 +60,11 @@ foreach ($testedGate in @(
     "eventspeedreplication",
     "weatherreplication",
     "weathertemperaturereplication",
-    "eventdiagnostics")) {
+    "eventdiagnostics",
+    "productionstatev2",
+    "productionticketordersv2",
+    "workstationruntimepresentation",
+    "resourcecontainerreplication")) {
     if ($settings[$testedGate] -ne "true") { throw "Committed test config must enable $testedGate." }
 }
 foreach ($disabledGate in @(

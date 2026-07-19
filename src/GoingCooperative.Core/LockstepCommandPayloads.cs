@@ -24,6 +24,7 @@ namespace GoingCooperative.Core
         public const string EquipOrderAction = "EquipOrder";
         public const string ResearchActivateAction = "ResearchActivate";
         public const string ProductionQueueAction = "ProductionQueue";
+        public const string ProductionQueueV2Action = "ProductionQueueV2";
         public const string ManagementPolicyAction = "ManagementPolicy";
         public const string WorkerManagePresetAction = "WorkerManagePreset";
         public const string DraftStateAction = "DraftState";
@@ -631,6 +632,58 @@ namespace GoingCooperative.Core
             value = 0;
             return normalized.IndexOf("\"action\":\"" + ProductionQueueAction + "\"", StringComparison.Ordinal) >= 0
                 && TryReadStringProperty(normalized, "operation", out operation)
+                && TryReadIntProperty(normalized, "buildingX", out buildingX)
+                && TryReadIntProperty(normalized, "buildingY", out buildingY)
+                && TryReadIntProperty(normalized, "buildingZ", out buildingZ)
+                && TryReadIntProperty(normalized, "ticketIndex", out ticketIndex)
+                && TryReadStringProperty(normalized, "blueprintId", out blueprintId)
+                && TryReadIntProperty(normalized, "value", out value);
+        }
+
+        public static string CreateProductionQueueV2Payload(
+            string operation,
+            long ticketId,
+            int buildingX,
+            int buildingY,
+            int buildingZ,
+            int ticketIndex,
+            string blueprintId,
+            int value)
+        {
+            return "{\"action\":\"" + ProductionQueueV2Action
+                + "\",\"operation\":\"" + EscapeJsonString(operation)
+                + "\",\"ticketId\":" + ticketId.ToString(CultureInfo.InvariantCulture)
+                + ",\"buildingX\":" + buildingX.ToString(CultureInfo.InvariantCulture)
+                + ",\"buildingY\":" + buildingY.ToString(CultureInfo.InvariantCulture)
+                + ",\"buildingZ\":" + buildingZ.ToString(CultureInfo.InvariantCulture)
+                + ",\"ticketIndex\":" + ticketIndex.ToString(CultureInfo.InvariantCulture)
+                + ",\"blueprintId\":\"" + EscapeJsonString(blueprintId)
+                + "\",\"value\":" + value.ToString(CultureInfo.InvariantCulture)
+                + "}";
+        }
+
+        public static bool TryReadProductionQueueV2Payload(
+            string payloadJson,
+            out string operation,
+            out long ticketId,
+            out int buildingX,
+            out int buildingY,
+            out int buildingZ,
+            out int ticketIndex,
+            out string blueprintId,
+            out int value)
+        {
+            var normalized = Normalize(payloadJson);
+            operation = string.Empty;
+            ticketId = 0L;
+            buildingX = buildingY = buildingZ = 0;
+            ticketIndex = -1;
+            blueprintId = string.Empty;
+            value = 0;
+            return normalized.IndexOf("\"action\":\"" + ProductionQueueV2Action + "\"", StringComparison.Ordinal) >= 0
+                && TryReadStringProperty(normalized, "operation", out operation)
+                && TryReadLongProperty(normalized, "ticketId", out ticketId)
+                && ticketId > 0
                 && TryReadIntProperty(normalized, "buildingX", out buildingX)
                 && TryReadIntProperty(normalized, "buildingY", out buildingY)
                 && TryReadIntProperty(normalized, "buildingZ", out buildingZ)

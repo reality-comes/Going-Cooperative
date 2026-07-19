@@ -230,6 +230,22 @@ namespace GoingCooperative.Plugin.BepInEx
                 return TryApplyReplicationProductionQueue(operation, buildingX, buildingY, buildingZ, ticketIndex, productionBlueprintId, value, out detail);
             }
 
+            if (LockstepCommandPayloads.TryReadProductionQueueV2Payload(
+                payloadJson,
+                out var operationV2,
+                out var ticketIdV2,
+                out var buildingXV2,
+                out var buildingYV2,
+                out var buildingZV2,
+                out var ticketIndexV2,
+                out var productionBlueprintIdV2,
+                out var valueV2))
+            {
+                return TryApplyReplicationProductionQueueV2(
+                    operationV2, ticketIdV2, buildingXV2, buildingYV2, buildingZV2,
+                    ticketIndexV2, productionBlueprintIdV2, valueV2, out detail);
+            }
+
             if (LockstepCommandPayloads.TryReadEquipOrderPayload(
                 payloadJson,
                 out var entityId,

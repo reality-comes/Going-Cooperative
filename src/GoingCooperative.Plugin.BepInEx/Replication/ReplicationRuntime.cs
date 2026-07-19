@@ -198,13 +198,19 @@ namespace GoingCooperative.Plugin.BepInEx
                 if (replicationRemoteHelloReceived)
                 {
                     SendHostTransformSnapshotIfDue();
-                    SendHostReplicationResourceContainersIfDue();
+                    if (!replicationConfigProductionStateV2)
+                    {
+                        SendHostReplicationResourceContainersIfDue();
+                    }
                     SendHostReplicationResourcePileStateSnapshotIfDue();
                     SendHostReplicationAgentCarryStateSnapshotIfDue();
                     SendHostReplicationAgentActionHeartbeatIfDue();
                     SendHostReplicationAgentCharacterStateSnapshotIfDue();
                     UpdateReplicationBuildingLifecycleV2();
-                    UpdateReplicationWorkstationRuntimePresentation();
+                    if (!replicationConfigProductionStateV2)
+                    {
+                        UpdateReplicationWorkstationRuntimePresentation();
+                    }
                     SendHostReplicationBuildingStateSnapshotIfDue();
                     SendHostReplicationGameTimeSnapshotIfDue();
                     UpdateReplicationAnimalState();
@@ -226,6 +232,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 ProcessPendingReplicationNeedsRepairs();
             }
 
+            UpdateReplicationProductionStateV2();
             ProcessReplicationSemanticAgentMotionPresentation();
             ProcessReplicationSemanticAgentWorkPresentation();
             ProcessReplicationCombatPresentationExpiry();
@@ -412,6 +419,7 @@ namespace GoingCooperative.Plugin.BepInEx
             ClearReplicationHostIdentityMap();
             ClearReplicationAgentCarryResourceVisuals();
             ClearReplicationResourceContainerState();
+            ClearReplicationProductionStateV2();
             replicationVisualLocomotionByEntityId.Clear();
             replicationAnimatorParameterSupportByInstanceId.Clear();
             ClearReplicationPresentationSmoothing();
@@ -758,6 +766,12 @@ namespace GoingCooperative.Plugin.BepInEx
                 + FormatReplicationAgentPresentationCapability()
                 + "|building="
                 + FormatReplicationBuildingCapability()
+                + "|production="
+                + (replicationConfigProductionStateV2 ? "1" : "0")
+                + (replicationConfigProductionTicketOrdersV2 ? "1" : "0")
+                + (replicationConfigWorkstationRuntimePresentation ? "1" : "0")
+                + (replicationConfigResourceContainerReplication ? "1" : "0")
+                + ":1"
                 + "|combat="
                 + FormatReplicationCombatCapabilityFingerprint()
                 + "|events="
@@ -2265,6 +2279,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 + FormatReplicationSemanticAgentMotionStatus()
                 + " "
                 + FormatReplicationSemanticWorkStatus()
+                + " "
+                + FormatReplicationProductionStateV2Status()
                 + " "
                 + FormatReplicationEventStatus()
                 + " "

@@ -4660,6 +4660,11 @@ namespace GoingCooperative.Plugin.BepInEx
                 return TryApplyReplicationNeedsLifecycleDelta(delta, out detail);
             }
 
+            if (string.Equals(delta.DeltaKind, ReplicationProductionTicketIdentityV2DeltaKind, StringComparison.Ordinal))
+            {
+                return TryApplyReplicationProductionTicketIdentityV2(delta, out detail);
+            }
+
             if (string.Equals(delta.DeltaKind, ReplicationWorkstationRuntimeDeltaKind, StringComparison.Ordinal))
             {
                 return TryApplyReplicationWorkstationRuntimePresentation(delta, out detail);
@@ -15619,6 +15624,12 @@ namespace GoingCooperative.Plugin.BepInEx
                     + (TryReadReplicationWorldObjectDetailInt(delta.Detail, "ticketIndex", out var ticketIndex)
                         ? ticketIndex.ToString(CultureInfo.InvariantCulture)
                         : "unknown");
+            }
+
+            if (string.Equals(delta.DeltaKind, ReplicationProductionTicketIdentityV2DeltaKind, StringComparison.Ordinal))
+            {
+                return "ProductionTicketIdentityV2|ticket="
+                    + delta.UniqueId.ToString(CultureInfo.InvariantCulture);
             }
 
             if (string.Equals(delta.DeltaKind, "AgentCarryResourceChanged", StringComparison.Ordinal)

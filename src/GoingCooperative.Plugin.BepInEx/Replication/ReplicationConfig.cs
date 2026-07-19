@@ -42,6 +42,10 @@ namespace GoingCooperative.Plugin.BepInEx
         // Client-only rollback gate for host-authored sleep presentation through
         // CreatureBase.IsSleeping instead of replaying LifeController global events.
         private static bool replicationConfigHostSleepPresentationV2;
+        // Master rollback gate for the event-driven production registry and
+        // scheduler. Sub-gates below remain independently reversible.
+        private static bool replicationConfigProductionStateV2;
+        private static bool replicationConfigProductionTicketOrdersV2;
         // Optional, presentation-only workstation runtime lane. It never owns
         // queue policy, resources, ticket completion, or simulation.
         private static bool replicationConfigWorkstationRuntimePresentation;
@@ -218,6 +222,10 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigNeedsReplication
                     + " hostSleepPresentationV2="
                     + replicationConfigHostSleepPresentationV2
+                    + " productionStateV2="
+                    + replicationConfigProductionStateV2
+                    + " productionTicketOrdersV2="
+                    + replicationConfigProductionTicketOrdersV2
                     + " workstationRuntimePresentation="
                     + replicationConfigWorkstationRuntimePresentation
                     + " interpolationMs="
@@ -707,6 +715,16 @@ namespace GoingCooperative.Plugin.BepInEx
                 case "workstationruntimepresentation":
                 case "productionruntimepresentation":
                     if (TryParseConfigBool(value, out var workstationRuntimePresentation)) replicationConfigWorkstationRuntimePresentation = workstationRuntimePresentation;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "productionstatev2":
+                case "productionregistryv2":
+                    if (TryParseConfigBool(value, out var productionStateV2)) replicationConfigProductionStateV2 = productionStateV2;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "productionticketordersv2":
+                case "productionordersv2":
+                    if (TryParseConfigBool(value, out var productionTicketOrdersV2)) replicationConfigProductionTicketOrdersV2 = productionTicketOrdersV2;
                     else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
                     break;
                 case "applysnapshots":

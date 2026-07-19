@@ -731,6 +731,32 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool TryApplyReplicationProductionStorageContainer(ReplicationResourceContainerState state, out string detail)
         {
             var systemDetail = "ticket-index-invalid";
+            if (replicationConfigProductionStateV2
+                && state.ContainerKind.StartsWith("production-v2-", StringComparison.Ordinal))
+            {
+                var ownerParts = state.OwnerId.Split(':');
+                if (ownerParts.Length != 2
+                    || !long.TryParse(ownerParts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var hostTicketId)
+                    || hostTicketId <= 0
+                    || !int.TryParse(ownerParts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var ticketIndexV2)
+                    || ticketIndexV2 < 0)
+                {
+                    detail = "production-v2-storage-invalid-ticket-index";
+                    return false;
+                }
+                if (TryResolveOrBindReplicationProductionTicketV2(
+                        hostTicketId, state.GridX, state.GridY, state.GridZ,
+                        ticketIndexV2, string.Empty, out var v2Record, out var bindDetail)
+                    && v2Record != null)
+                {
+                    var applied = TryApplyReplicationProductionStorageContainerV2(state, v2Record, out detail);
+                    detail += " " + bindDetail;
+                    return applied;
+                }
+                detail = "production-v2-storage-pending " + bindDetail;
+                return false;
+            }
+
             if (!int.TryParse(state.OwnerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ticketIndex))
             {
                 detail = "production-unresolved " + systemDetail;
@@ -778,8 +804,50 @@ namespace GoingCooperative.Plugin.BepInEx
             return true;
         }
 
+        private static bool TryApplyReplicationProductionStorageContainerV2(
+            ReplicationResourceContainerState state,
+            ReplicationProductionTicketV2 record,
+            out string detail)
+        {
+            var memberName = string.Equals(state.ContainerKind, "production-v2-secondary", StringComparison.Ordinal)
+                ? "SecondaryIngredientStorage"
+                : "Storage";
+            if (!TryReadInstanceMemberValue(record.Ticket, memberName, out var storage) || storage == null
+                || !TryReadReplicationStorageEntries(storage, out var localEntries, out var localDetail))
+            {
+                detail = "production-v2-storage-unresolved member=" + memberName;
+                return false;
+            }
+
+            var desired = ToReplicationResourceAmountMap(state.Entries);
+            var local = ToReplicationResourceAmountMap(localEntries);
+            var changed = 0;
+            foreach (var pair in local)
+            {
+                desired.TryGetValue(pair.Key, out var desiredAmount);
+                if (pair.Value > desiredAmount && TryMutateReplicationStorage(storage, pair.Key, pair.Value - desiredAmount, false, out _)) changed++;
+            }
+            foreach (var pair in desired)
+            {
+                local.TryGetValue(pair.Key, out var localAmount);
+                if (pair.Value > localAmount && TryMutateReplicationStorage(storage, pair.Key, pair.Value - localAmount, true, out _)) changed++;
+            }
+
+            TryRefreshReplicationProductionTicketViewV2(record.Ticket);
+            detail = "ok production-v2-storage kind=" + state.ContainerKind
+                + " changed=" + changed.ToString(CultureInfo.InvariantCulture)
+                + " entries=" + state.Entries.Count.ToString(CultureInfo.InvariantCulture)
+                + " " + localDetail;
+            return true;
+        }
+
         private static void RefreshReplicationProductionTicketViews(object system, object ticket, int x, int y, int z, int ticketIndex)
         {
+            if (TryRefreshReplicationProductionTicketViewV2(ticket))
+            {
+                return;
+            }
+
             var viewType = HarmonyLib.AccessTools.TypeByName("NSMedieval.UI.ProductionLayoutItemView");
             if (viewType == null) return;
             var views = Resources.FindObjectsOfTypeAll(viewType);

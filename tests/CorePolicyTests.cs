@@ -284,6 +284,17 @@ internal static class CorePolicyTests
         Equal("meal_stew", blueprint, "production blueprint");
         Equal(20, value, "production value");
 
+        var productionV2 = LockstepCommandPayloads.CreateProductionQueueV2Payload("SetCount", 9012L, 10, 5, 12, 2, "meal_\"stew", 25);
+        Equal(true, LockstepCommandPayloads.TryReadProductionQueueV2Payload(productionV2, out var operationV2, out var ticketIdV2, out var xV2, out var yV2, out var zV2, out var indexV2, out var blueprintV2, out var valueV2), "production-v2 payload parses");
+        Equal("SetCount", operationV2, "production-v2 operation");
+        Equal(9012L, ticketIdV2, "production-v2 stable ticket id");
+        Equal(5, yV2, "production-v2 fallback map Y");
+        Equal(2, indexV2, "production-v2 fallback ticket index");
+        Equal("meal_\"stew", blueprintV2, "production-v2 fallback blueprint");
+        Equal(25, valueV2, "production-v2 value");
+        Equal(false, LockstepCommandPayloads.TryReadProductionQueueV2Payload(productionV2.Replace("\"ticketId\":9012", "\"ticketId\":0"), out _, out _, out _, out _, out _, out _, out _, out _), "production-v2 rejects missing stable identity");
+        Equal(false, LockstepCommandPayloads.TryReadProductionQueueV2Payload(production, out _, out _, out _, out _, out _, out _, out _, out _), "production-v2 rejects legacy action");
+
         var policy = LockstepCommandPayloads.CreateManagementPolicyPayload("WorkerSchedule", "uid:-3", "Sleep", 7, 2, true);
         Equal(true, LockstepCommandPayloads.TryReadManagementPolicyPayload(policy, out var policyKind, out var targetId, out var policyKey, out var policyIndex, out var policyValue, out var policyEnabled), "management policy parses");
         Equal("WorkerSchedule", policyKind, "management policy kind");

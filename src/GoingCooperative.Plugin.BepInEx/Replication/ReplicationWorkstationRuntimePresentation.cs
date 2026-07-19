@@ -93,6 +93,11 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryGetReplicationProductionSystem(object building, Type componentType, out object? system)
         {
+            if (replicationConfigProductionStateV2)
+            {
+                return TryGetReplicationProductionSystemV2(building, out system);
+            }
+
             system = null;
             foreach (var method in building.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
             {
@@ -115,7 +120,9 @@ namespace GoingCooperative.Plugin.BepInEx
                 || !TryReadReplicationWorldObjectDetailInt(delta.Detail, "y", out var y)
                 || !TryReadReplicationWorldObjectDetailInt(delta.Detail, "z", out var z)
                 || !TryReadReplicationWorldObjectDetailInt(delta.Detail, "ticketIndex", out var ticketIndex)
-                || !TryReadReplicationWorldObjectDetailInt(delta.Detail, "progressPermille", out var permille))
+                || !TryReadReplicationWorldObjectDetailInt(delta.Detail, "progressPermille", out var permille)
+                || !TryReadReplicationWorldObjectDetailInt(delta.Detail, "stepIndex", out var stepIndex)
+                || !TryReadReplicationWorldObjectDetailToken(delta.Detail, "state", out var stateName))
             {
                 detail = "workstation-runtime-payload-invalid";
                 return false;
@@ -124,6 +131,32 @@ namespace GoingCooperative.Plugin.BepInEx
             var progress = Mathf.Clamp01(permille / 1000f);
             var key = FormatReplicationWorkstationRuntimeKey(x, y, z, ticketIndex);
             ReplicationWorkstationRuntimeLastClientProgress[key] = progress;
+            TryReadReplicationWorldObjectDetailLong(delta.Detail, "ticketId", out var ticketId);
+            if (replicationConfigProductionStateV2 && ticketId > 0)
+            {
+                if (!TryResolveOrBindReplicationProductionTicketV2(
+                        ticketId, x, y, z, ticketIndex, delta.BlueprintId,
+                        out var ticketRecord, out var ticketBindDetail)
+                    || ticketRecord == null)
+                {
+                    detail = "workstation-runtime-v2-ticket-pending ticketId="
+                        + ticketId.ToString(CultureInfo.InvariantCulture) + " " + ticketBindDetail;
+                    return false;
+                }
+                TryApplyReplicationProductionRuntimeStateV2(ticketRecord, stateName, stepIndex, out var stateDetail);
+                if (ReplicationProductionUiViewByTicket.TryGetValue(ticketRecord.Ticket, out var registeredView)
+                    && registeredView != null)
+                {
+                    TryRefreshReplicationProductionTicketViewV2(ticketRecord.Ticket);
+                    ApplyReplicationWorkstationTicketProjection(registeredView, progress);
+                }
+                var registeredCircleDetail = ApplyReplicationWorkstationProductionCircle(x, y, z, ticketIndex, progress);
+                detail = "ok workstation-runtime-v2 projected=" + (registeredView != null ? "1" : "0")
+                    + " progressPermille=" + permille.ToString(CultureInfo.InvariantCulture)
+                    + " " + ticketBindDetail + " " + stateDetail + " " + registeredCircleDetail;
+                return true;
+            }
+
             var viewType = AccessTools.TypeByName("NSMedieval.UI.ProductionLayoutItemView");
             if (viewType == null)
             {
@@ -171,8 +204,13 @@ namespace GoingCooperative.Plugin.BepInEx
         private static void ReplicationWorkstationRuntimeItemViewPostfix(object __instance)
         {
             if (!replicationConfigWorkstationRuntimePresentation || replicationConfigHostMode || __instance == null
-                || !TryReadInstanceMemberValue(__instance, "production", out var ticket) || ticket == null
-                || !TryReadInstanceMemberValue(ticket, "ownerSystem", out var system) || system == null
+                || !TryReadInstanceMemberValue(__instance, "production", out var ticket) || ticket == null)
+            {
+                return;
+            }
+
+            RegisterReplicationProductionTicketViewV2(__instance, ticket);
+            if (!TryReadInstanceMemberValue(ticket, "ownerSystem", out var system) || system == null
                 || !TryResolveProductionSystemGrid(system, out var x, out var y, out var z, out _)
                 || !TryGetListMember(system, "productions", out var queue))
             {
@@ -207,7 +245,9 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static string ApplyReplicationWorkstationProductionCircle(int x, int y, int z, int ticketIndex, float progress)
         {
-            var componentType = AccessTools.TypeByName("NSMedieval.BuildingComponents.ProductionComponent");
+            var componentType = replicationConfigProductionStateV2
+                ? replicationProductionVisualComponentTypeV2
+                : AccessTools.TypeByName("NSMedieval.BuildingComponents.ProductionComponent");
             if (componentType == null)
             {
                 return "production-circle-component-type-missing";
@@ -215,7 +255,12 @@ namespace GoingCooperative.Plugin.BepInEx
 
             try
             {
-                var components = Resources.FindObjectsOfTypeAll(componentType);
+                var components = replicationConfigProductionStateV2
+                    ? TryFindReplicationProductionComponentV2AtGrid(x, y, z, out var registeredComponent)
+                        && registeredComponent is UnityEngine.Object registeredObject
+                            ? new[] { registeredObject }
+                            : Array.Empty<UnityEngine.Object>()
+                    : Resources.FindObjectsOfTypeAll(componentType);
                 for (var i = 0; i < components.Length; i++)
                 {
                     var component = components[i];
@@ -293,7 +338,9 @@ namespace GoingCooperative.Plugin.BepInEx
                     }
                 }
 
-                return "production-circle-component-pending";
+                return replicationConfigProductionStateV2
+                    ? "production-circle-v2-component-pending"
+                    : "production-circle-component-pending";
             }
             catch (Exception ex)
             {
