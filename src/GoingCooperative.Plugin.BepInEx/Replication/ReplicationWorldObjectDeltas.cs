@@ -542,6 +542,18 @@ namespace GoingCooperative.Plugin.BepInEx
                 return;
             }
 
+            // Sleep-v2 is the sole owner of sleep presentation. Sleep actions
+            // frequently have no AgentOwner at this callback, and routing them
+            // through semantic-work capture both produces misleading failures
+            // and can replay a second animation transition against the native
+            // IsSleeping lane.
+            if (replicationConfigHostSleepPresentationV2
+                && (string.Equals(trigger, "Sleep", StringComparison.Ordinal)
+                    || string.Equals(trigger, "Rest", StringComparison.Ordinal)))
+            {
+                return;
+            }
+
             var current = instance;
             if (ReferenceEquals(current, null))
             {

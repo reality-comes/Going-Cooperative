@@ -32,10 +32,16 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigAnimateReplicatedMovement = true;
         private static bool replicationConfigSmoothReplicatedMovement = true;
         private static bool replicationConfigSemanticAgentPresentation;
+        // Client-only rollback gate for the debounced animal locomotion/facing
+        // presentation state machine. It does not change transform authority or wire data.
+        private static bool replicationConfigSemanticAnimalPresentationV2;
         // Narrow rollback gate for the Chop/Dig/Harvest client animation-cycle
         // controller. False preserves the previous semantic work presentation.
         private static bool replicationConfigSemanticWorkCycleDriver;
         private static bool replicationConfigNeedsReplication = true;
+        // Client-only rollback gate for host-authored sleep presentation through
+        // CreatureBase.IsSleeping instead of replaying LifeController global events.
+        private static bool replicationConfigHostSleepPresentationV2;
         // Optional, presentation-only workstation runtime lane. It never owns
         // queue policy, resources, ticket completion, or simulation.
         private static bool replicationConfigWorkstationRuntimePresentation;
@@ -204,10 +210,14 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigSmoothReplicatedMovement
                     + " semanticAgentPresentation="
                     + replicationConfigSemanticAgentPresentation
+                    + " semanticAnimalPresentationV2="
+                    + replicationConfigSemanticAnimalPresentationV2
                     + " semanticWorkCycleDriver="
                     + replicationConfigSemanticWorkCycleDriver
                     + " needsReplication="
                     + replicationConfigNeedsReplication
+                    + " hostSleepPresentationV2="
+                    + replicationConfigHostSleepPresentationV2
                     + " workstationRuntimePresentation="
                     + replicationConfigWorkstationRuntimePresentation
                     + " interpolationMs="
@@ -505,6 +515,18 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryParseConfigBool(value, out var semanticAgentPresentation))
                     {
                         replicationConfigSemanticAgentPresentation = semanticAgentPresentation;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "semanticanimalpresentationv2":
+                case "animalpresentationv2":
+                    if (TryParseConfigBool(value, out var semanticAnimalPresentationV2))
+                    {
+                        replicationConfigSemanticAnimalPresentationV2 = semanticAnimalPresentationV2;
                     }
                     else
                     {
@@ -916,6 +938,18 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryParseConfigBool(value, out var worldObjectDeltaDiagnostics))
                     {
                         replicationConfigWorldObjectDeltaDiagnostics = worldObjectDeltaDiagnostics;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "hostsleeppresentationv2":
+                case "sleeppresentationv2":
+                    if (TryParseConfigBool(value, out var hostSleepPresentationV2))
+                    {
+                        replicationConfigHostSleepPresentationV2 = hostSleepPresentationV2;
                     }
                     else
                     {

@@ -36,10 +36,11 @@ namespace GoingCooperative.Plugin.BepInEx
         private void TryInstallReplicationHostMovementAuthority(Harmony harmonyInstance)
         {
             TryLoadReplicationConfig(this);
-            if (!replicationConfigEnabled
-                || replicationConfigHostMode
-                || !replicationConfigApplySnapshots
-                || !replicationConfigForceHostMovement)
+            // The multiplayer UI assigns enabled/role/applySnapshots after plugin
+            // startup. Install from the static feature gate alone; the prefix checks
+            // the live session state and therefore remains inert on the host and while
+            // disconnected, then activates as soon as this process becomes the client.
+            if (!replicationConfigForceHostMovement)
             {
                 return;
             }

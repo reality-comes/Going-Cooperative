@@ -47,9 +47,13 @@ if ($settings["enabled"] -ne "false") { throw "Release config must leave replica
 if ($settings["multiplayermenu"] -ne "true") { throw "Release config must enable the Multiplayer UI." }
 foreach ($testedGate in @(
     "semanticagentpresentation",
+    "semanticanimalpresentationv2",
     "semanticworkcycledriver",
+    "hostsleeppresentationv2",
     "buildingreplicationv2",
     "eventreplication",
+    "eventtraderauthority",
+    "synchronizedtrading",
     "eventlifecyclereplication",
     "eventdialogreplication",
     "eventchoicecommands",
@@ -61,8 +65,6 @@ foreach ($testedGate in @(
 }
 foreach ($disabledGate in @(
     "eventschedulerauthority",
-    "eventtraderauthority",
-    "synchronizedtrading",
     "eventwarningreplication",
     "eventnoticereplication",
     "eventexternalagentlifecycle",

@@ -18,11 +18,13 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private sealed class ReplicationAppliedView
         {
+            public readonly UnityEngine.Object View;
             public readonly Transform Transform;
             public readonly Animator? Animator;
 
-            public ReplicationAppliedView(Transform transform, Animator? animator)
+            public ReplicationAppliedView(UnityEngine.Object view, Transform transform, Animator? animator)
             {
+                View = view;
                 Transform = transform;
                 Animator = animator;
             }
@@ -123,6 +125,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 // is what keeps nametags/selection attached. Both write the same target.
                 transform.position = target;
                 transform.rotation = rotation;
+                ApplyReplicationAuthoritativeAnimalTargetRotation(view, entity.Kind, rotation);
                 var semanticMetadata = entity.Motion;
                 var semanticMotion = replicationConfigSemanticAgentPresentation && semanticMetadata.HasValue;
                 var semanticWorkActive = IsReplicationSemanticWorkPresentationActive(entity.EntityId);
@@ -219,7 +222,7 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var transform = behaviour.transform;
-            var appliedView = new ReplicationAppliedView(transform, TryGetReplicationViewAnimator(view, behaviour));
+            var appliedView = new ReplicationAppliedView(view, transform, TryGetReplicationViewAnimator(view, behaviour));
             if (TryGetReplicationViewEntityId(view, out var entityId) && !lookup.ContainsKey(entityId))
             {
                 lookup[entityId] = appliedView;
@@ -231,6 +234,25 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 lookup[fallbackId] = appliedView;
             }
+        }
+
+        private static void ApplyReplicationAuthoritativeAnimalTargetRotation(
+            ReplicationAppliedView view,
+            string kind,
+            Quaternion rotation)
+        {
+            if (!replicationConfigSemanticAnimalPresentationV2
+                || !string.Equals(kind, "animal", StringComparison.Ordinal)
+                || view.View is not NSMedieval.View.AnimatedAgentView animatedView)
+            {
+                return;
+            }
+
+            // AnimatedAgentView.Update rotates the root toward TargetRotation every
+            // frame.  Keep that native presentation target aligned with the same
+            // interpolated host rotation we write to the root, otherwise the two
+            // writers visibly tug animals back and forth between snapshots.
+            animatedView.TargetRotation = rotation;
         }
 
         private static Animator? TryGetReplicationViewAnimator(UnityEngine.Object view, MonoBehaviour behaviour)

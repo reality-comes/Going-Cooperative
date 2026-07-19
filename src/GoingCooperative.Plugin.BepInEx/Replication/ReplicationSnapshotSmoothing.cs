@@ -63,6 +63,11 @@ namespace GoingCooperative.Plugin.BepInEx
             public float RunningHoldUntilRealtime;
             public float LastMovementSpeed;
             public float LastAnimatorSpeed = 1f;
+            public bool MoveStartPending;
+            public float MoveStartPendingSinceRealtime;
+            public bool MoveStopPending;
+            public float MoveStopPendingSinceRealtime;
+            public bool IdleAnimatorSettled;
             public bool FacingInitialized;
             public Vector3 StableFacingDirection;
             public bool PendingFacingInitialized;
@@ -82,6 +87,10 @@ namespace GoingCooperative.Plugin.BepInEx
         private const float ReplicationPresentationAnimalMoveStartSpeed = 0.08f;
         private const float ReplicationPresentationAnimalMoveStopSpeed = 0.035f;
         private const float ReplicationPresentationAnimalMoveHoldSeconds = 0.16f;
+        private const float ReplicationPresentationAnimalV2MoveStartConfirmSeconds = 0.14f;
+        private const float ReplicationPresentationAnimalV2MoveStopConfirmSeconds = 0.4f;
+        private const float ReplicationPresentationAnimalV2ImmediateStartSpeed = 0.35f;
+        private const float ReplicationPresentationAnimalV2TangentMinimumSpeed = 0.18f;
         private const float ReplicationPresentationAnimalRunStartSpeed = 1.2f;
         private const float ReplicationPresentationAnimalRunStopSpeed = 0.9f;
         private const float ReplicationPresentationAnimalRunHoldSeconds = 0.18f;
@@ -105,6 +114,10 @@ namespace GoingCooperative.Plugin.BepInEx
         private static long replicationPresentationSemanticInterpolatedFrames;
         private static long replicationPresentationAnimalMotionHeldFrames;
         private static long replicationPresentationAnimalFacingHeldFrames;
+        private static long replicationPresentationAnimalV2StartsRejected;
+        private static long replicationPresentationAnimalV2StopsHeld;
+        private static long replicationPresentationAnimalV2IdleWritesAvoided;
+        private static long replicationPresentationAnimalV2LowSpeedTangentsBypassed;
 
         private static void BufferReplicationTransformSnapshot(ReplicationTransformSnapshot snapshot, float receivedRealtime)
         {
@@ -219,8 +232,17 @@ namespace GoingCooperative.Plugin.BepInEx
                     out var rotation,
                     out var speed,
                     out var motion);
+                if (TryStabilizeReplicationNeedsSleepPresentationPose(
+                        pair.Key,
+                        now,
+                        ref position,
+                        ref rotation))
+                {
+                    speed = 0f;
+                }
                 view.Transform.position = position;
                 view.Transform.rotation = rotation;
+                ApplyReplicationAuthoritativeAnimalTargetRotation(view, track.Kind, rotation);
                 if (UpdateReplicationSmoothLocomotion(pair.Key, view.Animator, track.Kind, speed, motion))
                 {
                     moving++;
@@ -433,25 +455,59 @@ namespace GoingCooperative.Plugin.BepInEx
             tangent.y = 0f;
             if (tangent.sqrMagnitude > 0.0001f)
             {
-                var facing = tangent.normalized;
                 var animal = string.Equals(kind, "animal", StringComparison.Ordinal);
-                if (animal)
+                var bypassAnimalTangent = animal
+                    && replicationConfigSemanticAnimalPresentationV2
+                    && to.Motion.Value.MovementSpeed < ReplicationPresentationAnimalV2TangentMinimumSpeed
+                    && !to.Motion.Value.IsRunning
+                    && to.Motion.Value.Gait != ReplicationAgentLocomotionGait.Run
+                    && to.Motion.Value.Gait != ReplicationAgentLocomotionGait.Sprint;
+                if (bypassAnimalTangent)
                 {
-                    facing = StabilizeReplicationSemanticAnimalFacing(entityId, facing, to.Motion.Value, now);
+                    ObserveReplicationSemanticAnimalAuthoritativeFacing(entityId, rotation);
+                    replicationPresentationAnimalV2LowSpeedTangentsBypassed++;
                 }
-
-                if (facing.sqrMagnitude > 0.0001f)
+                else
                 {
-                    var targetRotation = Quaternion.LookRotation(facing, Vector3.up);
-                    var endpointEnvelope = 4f * t * (1f - t);
-                    var facingWeight = endpointEnvelope * (animal ? 0.55f : 0.3f);
-                    rotation = Quaternion.SlerpUnclamped(rotation, targetRotation, facingWeight);
+                    var facing = tangent.normalized;
+                    if (animal)
+                    {
+                        facing = StabilizeReplicationSemanticAnimalFacing(entityId, facing, to.Motion.Value, now);
+                    }
+
+                    if (facing.sqrMagnitude > 0.0001f)
+                    {
+                        var targetRotation = Quaternion.LookRotation(facing, Vector3.up);
+                        var endpointEnvelope = 4f * t * (1f - t);
+                        var animalFacingWeight = replicationConfigSemanticAnimalPresentationV2 ? 0.3f : 0.55f;
+                        var facingWeight = endpointEnvelope * (animal ? animalFacingWeight : 0.3f);
+                        rotation = Quaternion.SlerpUnclamped(rotation, targetRotation, facingWeight);
+                    }
                 }
             }
 
             replicationPresentationSemanticInterpolatedFrames++;
             replicationSemanticMotionInterpolationGuidedFrames++;
             return true;
+        }
+
+        private static void ObserveReplicationSemanticAnimalAuthoritativeFacing(string entityId, Quaternion rotation)
+        {
+            if (!ReplicationSemanticAnimalPresentationByEntityId.TryGetValue(entityId, out var state))
+            {
+                return;
+            }
+
+            var forward = rotation * Vector3.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude <= 0.0001f)
+            {
+                return;
+            }
+
+            state.FacingInitialized = true;
+            state.StableFacingDirection = forward.normalized;
+            state.PendingFacingInitialized = false;
         }
 
         private static Vector3 StabilizeReplicationSemanticAnimalFacing(
@@ -600,6 +656,15 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
+            // Sleep-v2 owns the complete animator pose until the authoritative
+            // wake transition. Continuing to rewrite locomotion parameters here
+            // makes the GUI overlay hook oscillate even when LayDown itself is
+            // healthy, because the name element follows the animated view.
+            if (IsReplicationNeedsSleepPresentationActive(entityId))
+            {
+                return false;
+            }
+
             if (replicationConfigSemanticAgentPresentation)
             {
                 // Work presentation owns the animator for its full active lifetime. This
@@ -613,6 +678,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 if (motion.HasValue)
                 {
                     return ApplyReplicationSemanticLocomotion(entityId, animator, motion.Value, animal);
+                }
+
+                if (animal
+                    && replicationConfigSemanticAnimalPresentationV2
+                    && TryApplyReplicationSemanticAnimalLocomotionWithoutMetadataV2(entityId, animator, out var animalMoving))
+                {
+                    return animalMoving;
                 }
 
                 if (animal && TryApplyReplicationSemanticAnimalLocomotionHold(entityId, animator))
@@ -670,6 +742,11 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
+            if (IsReplicationNeedsSleepPresentationActive(entityId))
+            {
+                return false;
+            }
+
             if (replicationConfigSemanticAgentPresentation
                 && IsReplicationSemanticWorkPresentationActive(entityId))
             {
@@ -683,14 +760,28 @@ namespace GoingCooperative.Plugin.BepInEx
             var animatorSpeed = motion.AnimatorSpeed;
             if (replicationConfigSemanticAgentPresentation && animal)
             {
-                ApplyReplicationSemanticAnimalLocomotionHysteresis(
-                    entityId,
-                    motion,
-                    ref moving,
-                    ref running,
-                    ref sprinting,
-                    ref movementSpeed,
-                    ref animatorSpeed);
+                if (replicationConfigSemanticAnimalPresentationV2)
+                {
+                    ApplyReplicationSemanticAnimalLocomotionV2(
+                        entityId,
+                        motion,
+                        ref moving,
+                        ref running,
+                        ref sprinting,
+                        ref movementSpeed,
+                        ref animatorSpeed);
+                }
+                else
+                {
+                    ApplyReplicationSemanticAnimalLocomotionHysteresis(
+                        entityId,
+                        motion,
+                        ref moving,
+                        ref running,
+                        ref sprinting,
+                        ref movementSpeed,
+                        ref animatorSpeed);
+                }
             }
 
             return WriteReplicationSemanticLocomotion(
@@ -781,6 +872,196 @@ namespace GoingCooperative.Plugin.BepInEx
                 animatorSpeed = Mathf.Max(animatorSpeed, Mathf.Lerp(1f, state.LastAnimatorSpeed, holdWeight));
                 replicationPresentationAnimalMotionHeldFrames++;
             }
+        }
+
+        private static void ApplyReplicationSemanticAnimalLocomotionV2(
+            string entityId,
+            ReplicationEntityMotionMetadata motion,
+            ref bool moving,
+            ref bool running,
+            ref bool sprinting,
+            ref float movementSpeed,
+            ref float animatorSpeed)
+        {
+            if (!ReplicationSemanticAnimalPresentationByEntityId.TryGetValue(entityId, out var state))
+            {
+                return;
+            }
+
+            var now = Time.realtimeSinceStartup;
+            var velocitySpeed = new Vector2(motion.VelocityX, motion.VelocityZ).magnitude;
+            var motionSignal = Mathf.Max(motion.MovementSpeed, velocitySpeed);
+            var explicitlyMoving = motion.IsMoving || motion.IsSwimming || motion.IsClimbing;
+            var explicitlyRunning = motion.IsRunning
+                || motion.Gait == ReplicationAgentLocomotionGait.Run
+                || motion.Gait == ReplicationAgentLocomotionGait.Sprint;
+            var wantsMovement = explicitlyMoving || motionSignal >= ReplicationPresentationAnimalMoveStartSpeed;
+            var immediateStart = explicitlyRunning
+                || motion.IsSwimming
+                || motion.IsClimbing
+                || motionSignal >= ReplicationPresentationAnimalV2ImmediateStartSpeed;
+
+            if (!state.Moving)
+            {
+                state.MoveStopPending = false;
+                if (!wantsMovement)
+                {
+                    if (state.MoveStartPending)
+                    {
+                        state.MoveStartPending = false;
+                        replicationPresentationAnimalV2StartsRejected++;
+                    }
+                }
+                else if (immediateStart)
+                {
+                    state.Moving = true;
+                    state.MoveStartPending = false;
+                }
+                else if (!state.MoveStartPending)
+                {
+                    state.MoveStartPending = true;
+                    state.MoveStartPendingSinceRealtime = now;
+                }
+                else if (now - state.MoveStartPendingSinceRealtime >= ReplicationPresentationAnimalV2MoveStartConfirmSeconds)
+                {
+                    state.Moving = true;
+                    state.MoveStartPending = false;
+                }
+            }
+            else
+            {
+                state.MoveStartPending = false;
+                var continueMovement = explicitlyMoving || motionSignal > ReplicationPresentationAnimalMoveStopSpeed;
+                if (continueMovement)
+                {
+                    state.MoveStopPending = false;
+                }
+                else if (!state.MoveStopPending)
+                {
+                    state.MoveStopPending = true;
+                    state.MoveStopPendingSinceRealtime = now;
+                }
+                else if (now - state.MoveStopPendingSinceRealtime >= ReplicationPresentationAnimalV2MoveStopConfirmSeconds)
+                {
+                    state.Moving = false;
+                    state.Running = false;
+                    state.Sprinting = false;
+                    state.MoveStopPending = false;
+                }
+                else
+                {
+                    replicationPresentationAnimalV2StopsHeld++;
+                }
+            }
+
+            if (state.Moving && (wantsMovement || motionSignal > ReplicationPresentationAnimalMoveStopSpeed))
+            {
+                state.LastMovementSpeed = Mathf.Max(motionSignal, ReplicationPresentationAnimalMoveStartSpeed);
+                state.LastAnimatorSpeed = Mathf.Max(0f, motion.AnimatorSpeed);
+            }
+
+            if (state.Moving && (explicitlyRunning || motionSignal >= ReplicationPresentationAnimalRunStartSpeed))
+            {
+                state.Running = true;
+                state.Sprinting = motion.Gait == ReplicationAgentLocomotionGait.Sprint;
+                state.RunningHoldUntilRealtime = now + ReplicationPresentationAnimalRunHoldSeconds;
+            }
+            else if (!state.Moving || now >= state.RunningHoldUntilRealtime)
+            {
+                state.Running = false;
+                state.Sprinting = false;
+            }
+
+            moving = state.Moving;
+            running = state.Running && moving;
+            sprinting = state.Sprinting && running;
+            if (moving && state.MoveStopPending)
+            {
+                var remaining = 1f - Mathf.Clamp01(
+                    (now - state.MoveStopPendingSinceRealtime) / ReplicationPresentationAnimalV2MoveStopConfirmSeconds);
+                movementSpeed = Mathf.Max(movementSpeed, state.LastMovementSpeed * remaining);
+                animatorSpeed = Mathf.Max(animatorSpeed, Mathf.Lerp(1f, state.LastAnimatorSpeed, remaining));
+            }
+            else if (!moving)
+            {
+                movementSpeed = 0f;
+                animatorSpeed = 1f;
+            }
+
+            state.IdleAnimatorSettled = !moving;
+        }
+
+        private static bool TryApplyReplicationSemanticAnimalLocomotionWithoutMetadataV2(
+            string entityId,
+            Animator animator,
+            out bool moving)
+        {
+            moving = false;
+            if (!ReplicationSemanticAnimalPresentationByEntityId.TryGetValue(entityId, out var state))
+            {
+                return false;
+            }
+
+            var now = Time.realtimeSinceStartup;
+            if (state.MoveStartPending && !state.Moving)
+            {
+                state.MoveStartPending = false;
+                replicationPresentationAnimalV2StartsRejected++;
+            }
+
+            if (state.Moving)
+            {
+                if (!state.MoveStopPending)
+                {
+                    state.MoveStopPending = true;
+                    state.MoveStopPendingSinceRealtime = now;
+                }
+
+                var elapsed = now - state.MoveStopPendingSinceRealtime;
+                if (elapsed < ReplicationPresentationAnimalV2MoveStopConfirmSeconds)
+                {
+                    var remaining = 1f - Mathf.Clamp01(elapsed / ReplicationPresentationAnimalV2MoveStopConfirmSeconds);
+                    replicationPresentationAnimalV2StopsHeld++;
+                    moving = true;
+                    state.IdleAnimatorSettled = false;
+                    WriteReplicationSemanticLocomotion(
+                        animator,
+                        moving: true,
+                        running: state.Running && now < state.RunningHoldUntilRealtime,
+                        sprinting: state.Sprinting && state.Running && now < state.RunningHoldUntilRealtime,
+                        swimming: false,
+                        climbDirection: 0,
+                        movementSpeed: state.LastMovementSpeed * remaining,
+                        animatorSpeed: Mathf.Lerp(1f, state.LastAnimatorSpeed, remaining));
+                    return true;
+                }
+
+                state.Moving = false;
+                state.Running = false;
+                state.Sprinting = false;
+                state.MoveStopPending = false;
+                state.IdleAnimatorSettled = false;
+            }
+
+            if (!state.IdleAnimatorSettled)
+            {
+                WriteReplicationSemanticLocomotion(
+                    animator,
+                    moving: false,
+                    running: false,
+                    sprinting: false,
+                    swimming: false,
+                    climbDirection: 0,
+                    movementSpeed: 0f,
+                    animatorSpeed: 1f);
+                state.IdleAnimatorSettled = true;
+            }
+            else
+            {
+                replicationPresentationAnimalV2IdleWritesAvoided++;
+            }
+
+            return true;
         }
 
         private static bool TryApplyReplicationSemanticAnimalLocomotionHold(string entityId, Animator animator)
@@ -985,6 +1266,10 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationPresentationSemanticInterpolatedFrames = 0L;
             replicationPresentationAnimalMotionHeldFrames = 0L;
             replicationPresentationAnimalFacingHeldFrames = 0L;
+            replicationPresentationAnimalV2StartsRejected = 0L;
+            replicationPresentationAnimalV2StopsHeld = 0L;
+            replicationPresentationAnimalV2IdleWritesAvoided = 0L;
+            replicationPresentationAnimalV2LowSpeedTangentsBypassed = 0L;
             ResetReplicationSemanticMotionState();
             ResetReplicationSemanticAgentMotionPresentation();
         }
@@ -1001,6 +1286,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 + " smoothSemanticCurves=" + replicationPresentationSemanticInterpolatedFrames
                 + " animalMotionHeld=" + replicationPresentationAnimalMotionHeldFrames
                 + " animalFacingHeld=" + replicationPresentationAnimalFacingHeldFrames
+                + " animalV2StartsRejected=" + replicationPresentationAnimalV2StartsRejected
+                + " animalV2StopsHeld=" + replicationPresentationAnimalV2StopsHeld
+                + " animalV2IdleWritesAvoided=" + replicationPresentationAnimalV2IdleWritesAvoided
+                + " animalV2LowSpeedTangentsBypassed=" + replicationPresentationAnimalV2LowSpeedTangentsBypassed
                 + " " + FormatReplicationSemanticMotionStatus();
         }
     }

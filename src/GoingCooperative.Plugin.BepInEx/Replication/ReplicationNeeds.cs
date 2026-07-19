@@ -16,6 +16,28 @@ namespace GoingCooperative.Plugin.BepInEx
             new Dictionary<string, long>(StringComparer.Ordinal);
         private static readonly Dictionary<string, bool> ReplicationNeedsLastSleepVisualByEntityId =
             new Dictionary<string, bool>(StringComparer.Ordinal);
+        private sealed class ReplicationSleepPresentationV2State
+        {
+            public bool Initialized;
+            public bool DesiredSleeping;
+            public bool VisualAppliedForDesiredState;
+            public long LastAuthoritativeSequence;
+            public bool PoseCandidateInitialized;
+            public Vector3 PoseCandidatePosition;
+            public Quaternion PoseCandidateRotation;
+            public float PoseCandidateSinceRealtime;
+            public bool PoseLocked;
+            public Vector3 LockedPosePosition;
+            public Quaternion LockedPoseRotation;
+            public Transform? OverlayHook;
+            public int OverlayHookInstanceId;
+            public bool OverlayHookPositionLocked;
+            public Vector3 LockedOverlayHookPosition;
+        }
+        private static readonly Dictionary<string, ReplicationSleepPresentationV2State> ReplicationNeedsSleepPresentationV2ByEntityId =
+            new Dictionary<string, ReplicationSleepPresentationV2State>(StringComparer.Ordinal);
+        private static readonly Dictionary<int, string> ReplicationNeedsSleepEntityIdByOverlayHookInstanceId =
+            new Dictionary<int, string>();
         // Sleep presentation is client-native in this build.  These keys are a
         // session boundary only: they prevent the several native SleepGoal end
         // callbacks from being replayed as separate wake transitions.
@@ -35,6 +57,22 @@ namespace GoingCooperative.Plugin.BepInEx
         private static long replicationNeedsEventsSent;
         private static long replicationNeedsEventsApplied;
         private static long replicationNeedsRepairValuesApplied;
+        private static long replicationNeedsSleepV2TransitionsApplied;
+        private static long replicationNeedsSleepV2MatchedStates;
+        private static long replicationNeedsSleepV2StatRepairsSuppressed;
+        private static long replicationNeedsSleepV2VisualTransitionsApplied;
+        private static long replicationNeedsSleepV2RecoveryVisualsApplied;
+        private static long replicationNeedsSleepV2PoseLocks;
+        private static long replicationNeedsSleepV2PoseLockBreaks;
+        private static long replicationNeedsSleepV2PoseHeldFrames;
+        private static long replicationNeedsSleepV2OverlayHookLocks;
+        private static long replicationNeedsSleepV2OverlayHookHeldFrames;
+        private static long replicationNeedsSleepV2ContradictoryNativeWritesSuppressed;
+
+        private const float ReplicationNeedsSleepV2PoseSettleSeconds = 0.3f;
+        private const float ReplicationNeedsSleepV2PoseSettleDistance = 0.015f;
+        private const float ReplicationNeedsSleepV2PoseSettleAngleDegrees = 0.75f;
+        private const float ReplicationNeedsSleepV2PoseBreakDistance = 0.75f;
 
         private void TryInstallReplicationNeedsHooks(Harmony harmonyInstance)
         {
@@ -56,6 +94,12 @@ namespace GoingCooperative.Plugin.BepInEx
             var starvingPostfix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
                 nameof(ReplicationNeedsStarvingPostfix),
                 BindingFlags.Static | BindingFlags.NonPublic));
+            var overlayHolderPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationNeedsFloatingElementHolderRefreshPositionPrefix),
+                BindingFlags.Static | BindingFlags.NonPublic));
+            var isSleepingPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationNeedsIsSleepingPrefix),
+                BindingFlags.Static | BindingFlags.NonPublic));
 
             var patched = 0;
             patched += TryPatchReplicationNeedsMethods(harmonyInstance, goalPostfix, "NSMedieval.Goap.Goals.HungerGoal",
@@ -74,6 +118,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 "FallAsleep", "WakeUp");
             patched += TryPatchReplicationNeedsMethods(harmonyInstance, starvingPostfix, "NSMedieval.Controllers.LifeController",
                 "Starving");
+            patched += TryPatchReplicationNeedsMethodsPrefix(harmonyInstance, overlayHolderPrefix,
+                "NSMedieval.FloatingOverlaySystem.FloatingElementHolder", "RefreshPosition");
+            patched += TryPatchReplicationNeedsMethodsPrefix(harmonyInstance, isSleepingPrefix,
+                "NSMedieval.State.CreatureBase", "set_IsSleeping");
             LogReplicationInfo("Going Cooperative needs lifecycle hooks patched="
                 + patched.ToString(CultureInfo.InvariantCulture));
         }
@@ -484,7 +532,12 @@ namespace GoingCooperative.Plugin.BepInEx
                 parts.Add(hungerDetail);
             }
 
-            if (pending.HasSleep && ShouldApplyReplicationNeedsStat(statsOwner, "Sleep", pending.SleepCurrent))
+            if (pending.HasSleep && replicationConfigHostSleepPresentationV2 && pending.IsSleeping)
+            {
+                replicationNeedsSleepV2StatRepairsSuppressed++;
+                parts.Add("Sleep=suppressed-authoritative-sleep");
+            }
+            else if (pending.HasSleep && ShouldApplyReplicationNeedsStat(statsOwner, "Sleep", pending.SleepCurrent))
             {
                 if (TryApplyReplicationNeedsStat(statsOwner, "Sleep", pending.SleepCurrent, out var sleepDetail))
                 {
@@ -493,9 +546,22 @@ namespace GoingCooperative.Plugin.BepInEx
                 parts.Add(sleepDetail);
             }
 
-            // Do not drive generic Animator booleans here.  Client-native sleep
-            // presentation already plays correctly, while forcing a guessed
-            // parameter on every stat repair causes visible wake/sleep fighting.
+            if (replicationConfigHostSleepPresentationV2)
+            {
+                var cleanupMatchedWake = !pending.IsSleeping
+                    && ReplicationNeedsLastSleepVisualByEntityId.TryGetValue(pending.EntityId, out var wasVisuallySleeping)
+                    && wasVisuallySleeping;
+                parts.Add(ApplyReplicationNeedsHostSleepPresentationV2(
+                    pending.EntityId,
+                    view,
+                    pending.IsSleeping,
+                    cleanupMatchedWake,
+                    authoritativeSequence: 0L,
+                    source: "character-state"));
+            }
+
+            // Legacy mode records the observed state without driving guessed
+            // Animator booleans. V2 above reconciles the native IsSleeping property.
             ReplicationNeedsLastSleepVisualByEntityId[pending.EntityId] = pending.IsSleeping;
 
             replicationNeedsRepairValuesApplied += applied;
@@ -589,17 +655,34 @@ namespace GoingCooperative.Plugin.BepInEx
             }
             else if (string.Equals(kind, "sleep", StringComparison.Ordinal))
             {
-                // The host owns the session boundaries.  Replay the game's
-                // native visual callbacks at those boundaries rather than
-                // guessing at Animator state.  These callbacks only update
-                // the local presentation; they do not run client simulation.
                 var sleeping = string.Equals(phase, "sleeping", StringComparison.Ordinal);
-                ReplicationNeedsLastSleepVisualByEntityId[entityId] = sleeping;
-                visualDetail = string.Equals(phase, "sleeping", StringComparison.Ordinal)
-                    ? ApplyReplicationNeedsNativeSleepPresentation(view)
-                    : string.Equals(phase, "woke", StringComparison.Ordinal)
-                        ? ApplyReplicationNeedsNativeWakePresentation(view)
-                        : "sleep-session-recorded native-visual";
+                if (replicationConfigHostSleepPresentationV2
+                    && (string.Equals(phase, "sleeping", StringComparison.Ordinal)
+                        || string.Equals(phase, "woke", StringComparison.Ordinal)))
+                {
+                    var cleanupMatchedWake = !sleeping
+                        && ReplicationNeedsLastSleepVisualByEntityId.TryGetValue(entityId, out var wasVisuallySleeping)
+                        && wasVisuallySleeping;
+                    visualDetail = ApplyReplicationNeedsHostSleepPresentationV2(
+                        entityId,
+                        view,
+                        sleeping,
+                        cleanupMatchedWake,
+                        delta.Sequence,
+                        "lifecycle");
+                    ReplicationNeedsLastSleepVisualByEntityId[entityId] = sleeping;
+                }
+                else
+                {
+                    // Legacy rollback path: replay the native global lifecycle event
+                    // and the view animation callback at each host session boundary.
+                    ReplicationNeedsLastSleepVisualByEntityId[entityId] = sleeping;
+                    visualDetail = string.Equals(phase, "sleeping", StringComparison.Ordinal)
+                        ? ApplyReplicationNeedsNativeSleepPresentation(view)
+                        : string.Equals(phase, "woke", StringComparison.Ordinal)
+                            ? ApplyReplicationNeedsNativeWakePresentation(view)
+                            : "sleep-session-recorded native-visual";
+                }
             }
 
             TryReadReplicationWorldObjectDetailBool(delta.Detail, "hasHunger", out var hasHunger);
@@ -647,6 +730,118 @@ namespace GoingCooperative.Plugin.BepInEx
             return "sleep-parameter-missing";
         }
 
+        private int TryPatchReplicationNeedsMethodsPrefix(Harmony harmonyInstance, HarmonyMethod prefix, string typeName, params string[] methodNames)
+        {
+            var type = AccessTools.TypeByName(typeName);
+            if (type == null)
+            {
+                LogReplicationWarning("Going Cooperative needs hook type missing type=" + typeName);
+                return 0;
+            }
+
+            var wanted = new HashSet<string>(methodNames, StringComparer.Ordinal);
+            var patched = 0;
+            foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+            {
+                if (!wanted.Contains(method.Name) || method.ContainsGenericParameters)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    harmonyInstance.Patch(method, prefix: prefix);
+                    patched++;
+                }
+                catch (Exception ex)
+                {
+                    LogReplicationWarning("Going Cooperative needs hook failed method="
+                        + typeName + "." + method.Name + " error=" + FormatReflectionExceptionDetail(ex));
+                }
+            }
+
+            return patched;
+        }
+
+        private static void ReplicationNeedsFloatingElementHolderRefreshPositionPrefix(object __instance)
+        {
+            if (!replicationConfigHostSleepPresentationV2
+                || !replicationConfigEnabled
+                || replicationConfigHostMode
+                || !replicationRuntimeStarted
+                || __instance == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var hook = AccessTools.Field(__instance.GetType(), "followingToTransform")?.GetValue(__instance) as Transform;
+                if (hook == null
+                    || !ReplicationNeedsSleepEntityIdByOverlayHookInstanceId.TryGetValue(hook.GetInstanceID(), out var entityId)
+                    || !IsReplicationNeedsSleepPresentationActive(entityId)
+                    || !ReplicationNeedsSleepPresentationV2ByEntityId.TryGetValue(entityId, out var state)
+                    || !ReferenceEquals(state.OverlayHook, hook)
+                    || !state.PoseLocked)
+                {
+                    return;
+                }
+
+                if (!state.OverlayHookPositionLocked)
+                {
+                    state.OverlayHookPositionLocked = true;
+                    state.LockedOverlayHookPosition = hook.position;
+                    replicationNeedsSleepV2OverlayHookLocks++;
+                    instance?.LogReplicationInfo("Going Cooperative sleep-v2 overlay hook locked entityId="
+                        + entityId
+                        + " position=("
+                        + hook.position.x.ToString("0.000", CultureInfo.InvariantCulture) + ","
+                        + hook.position.y.ToString("0.000", CultureInfo.InvariantCulture) + ","
+                        + hook.position.z.ToString("0.000", CultureInfo.InvariantCulture) + ")");
+                    return;
+                }
+
+                hook.position = state.LockedOverlayHookPosition;
+                replicationNeedsSleepV2OverlayHookHeldFrames++;
+            }
+            catch
+            {
+                // This is a per-frame presentation correction.  If a holder is
+                // being destroyed or rebuilt, let vanilla complete that frame.
+            }
+        }
+
+        private static bool ReplicationNeedsIsSleepingPrefix(object __instance, ref bool __0)
+        {
+            if (!replicationConfigHostSleepPresentationV2
+                || !replicationConfigEnabled
+                || replicationConfigHostMode
+                || !replicationRuntimeStarted
+                || applyingRuntimeCommandDepth > 0
+                || __instance == null
+                || !TryGetReplicationStableEntityId(__instance, out var entityId)
+                || !ReplicationNeedsSleepPresentationV2ByEntityId.TryGetValue(entityId, out var state)
+                || !state.Initialized
+                || __0 == state.DesiredSleeping)
+            {
+                return true;
+            }
+
+            replicationNeedsSleepV2ContradictoryNativeWritesSuppressed++;
+            if (replicationNeedsSleepV2ContradictoryNativeWritesSuppressed <= 8
+                || (replicationNeedsSleepV2ContradictoryNativeWritesSuppressed
+                    & (replicationNeedsSleepV2ContradictoryNativeWritesSuppressed - 1)) == 0)
+            {
+                instance?.LogReplicationInfo("Going Cooperative sleep-v2 suppressed contradictory client IsSleeping write entityId="
+                    + entityId
+                    + " attempted=" + (__0 ? "1" : "0")
+                    + " authoritative=" + (state.DesiredSleeping ? "1" : "0")
+                    + " count=" + replicationNeedsSleepV2ContradictoryNativeWritesSuppressed.ToString(CultureInfo.InvariantCulture));
+            }
+
+            return false;
+        }
+
         private static string ApplyReplicationNeedsNativeSleepTransition(object view, bool sleeping)
         {
             var action = sleeping ? "sleep" : "wake";
@@ -692,6 +887,269 @@ namespace GoingCooperative.Plugin.BepInEx
             }
         }
 
+        private static string ApplyReplicationNeedsHostSleepPresentationV2(
+            string entityId,
+            object view,
+            bool sleeping,
+            bool cleanupMatchedWake,
+            long authoritativeSequence,
+            string source)
+        {
+            try
+            {
+                if (!TryResolveReplicationAgentOwnerFromView(view, out var owner, out var ownerDetail)
+                    || owner == null)
+                {
+                    return "sleep-v2-owner-missing " + ownerDetail;
+                }
+
+                if (!ReplicationNeedsSleepPresentationV2ByEntityId.TryGetValue(entityId, out var presentationState))
+                {
+                    presentationState = new ReplicationSleepPresentationV2State();
+                    ReplicationNeedsSleepPresentationV2ByEntityId[entityId] = presentationState;
+                }
+                BindReplicationNeedsSleepOverlayHook(entityId, view, presentationState);
+
+                var previouslyInitialized = presentationState.Initialized;
+                var previouslySleeping = presentationState.DesiredSleeping;
+                var desiredChanged = !previouslyInitialized || previouslySleeping != sleeping;
+                if (desiredChanged)
+                {
+                    presentationState.Initialized = true;
+                    presentationState.DesiredSleeping = sleeping;
+                    presentationState.VisualAppliedForDesiredState = false;
+                    ResetReplicationNeedsSleepPresentationPose(presentationState);
+                }
+                if (authoritativeSequence > presentationState.LastAuthoritativeSequence)
+                {
+                    presentationState.LastAuthoritativeSequence = authoritativeSequence;
+                }
+
+                var stateKnown = TryReadReplicationBooleanState(owner, "IsSleeping", out var currentSleeping);
+                var logicalChanged = !stateKnown || currentSleeping != sleeping;
+                if (logicalChanged)
+                {
+                    var setter = AccessTools.Property(owner.GetType(), "IsSleeping")?.GetSetMethod(true);
+                    if (setter == null)
+                    {
+                        return "sleep-v2-setter-missing " + ownerDetail;
+                    }
+
+                    applyingRuntimeCommandDepth++;
+                    try
+                    {
+                        setter.Invoke(owner, new object[] { sleeping });
+                    }
+                    finally
+                    {
+                        applyingRuntimeCommandDepth--;
+                    }
+                    replicationNeedsSleepV2TransitionsApplied++;
+                }
+                else
+                {
+                    replicationNeedsSleepV2MatchedStates++;
+                }
+
+                if (sleeping)
+                {
+                    if (presentationState.VisualAppliedForDesiredState)
+                    {
+                        return "sleep-v2-state-matched sleeping=1 visual=already-applied";
+                    }
+
+                    string animationDetail;
+                    applyingRuntimeCommandDepth++;
+                    try
+                    {
+                        animationDetail = InvokeReplicationSemanticWorkAnimationTrigger(view, "Sleep", string.Empty);
+                    }
+                    finally
+                    {
+                        applyingRuntimeCommandDepth--;
+                    }
+                    presentationState.VisualAppliedForDesiredState = true;
+                    replicationNeedsSleepV2VisualTransitionsApplied++;
+                    if (!previouslyInitialized)
+                    {
+                        replicationNeedsSleepV2RecoveryVisualsApplied++;
+                    }
+                    LogReplicationNeedsSleepV2VisualTransition(
+                        entityId,
+                        source,
+                        sleeping: true,
+                        desiredChanged,
+                        logicalChanged,
+                        authoritativeSequence,
+                        animationDetail);
+                    return "sleep-v2-transition sleeping=1 " + animationDetail;
+                }
+
+                var shouldCleanupWake = !presentationState.VisualAppliedForDesiredState
+                    && ((previouslyInitialized && previouslySleeping) || cleanupMatchedWake);
+                if (!shouldCleanupWake)
+                {
+                    presentationState.VisualAppliedForDesiredState = true;
+                    return "sleep-v2-state-matched sleeping=0 cleanup=not-required";
+                }
+
+                var cleanupDetail = ApplyReplicationNeedsWakeVisualCleanup(view);
+                presentationState.VisualAppliedForDesiredState = true;
+                replicationNeedsSleepV2VisualTransitionsApplied++;
+                LogReplicationNeedsSleepV2VisualTransition(
+                    entityId,
+                    source,
+                    sleeping: false,
+                    desiredChanged,
+                    logicalChanged,
+                    authoritativeSequence,
+                    cleanupDetail);
+                return "sleep-v2-transition sleeping=0 " + cleanupDetail;
+            }
+            catch (Exception ex)
+            {
+                return "sleep-v2-error " + FormatReflectionExceptionDetail(ex);
+            }
+        }
+
+        private static void LogReplicationNeedsSleepV2VisualTransition(
+            string entityId,
+            string source,
+            bool sleeping,
+            bool desiredChanged,
+            bool logicalChanged,
+            long authoritativeSequence,
+            string visualDetail)
+        {
+            var current = instance;
+            if (ReferenceEquals(current, null))
+            {
+                return;
+            }
+
+            current.LogReplicationInfo("Going Cooperative sleep-v2 visual applied entityId="
+                + entityId
+                + " sleeping=" + (sleeping ? "1" : "0")
+                + " source=" + source
+                + " desiredChanged=" + (desiredChanged ? "1" : "0")
+                + " logicalChanged=" + (logicalChanged ? "1" : "0")
+                + " sequence=" + authoritativeSequence.ToString(CultureInfo.InvariantCulture)
+                + " detail=" + visualDetail);
+        }
+
+        private static bool IsReplicationNeedsSleepPresentationActive(string entityId)
+        {
+            return replicationConfigHostSleepPresentationV2
+                && !string.IsNullOrWhiteSpace(entityId)
+                && ReplicationNeedsSleepPresentationV2ByEntityId.TryGetValue(entityId, out var state)
+                && state.Initialized
+                && state.DesiredSleeping
+                && state.VisualAppliedForDesiredState;
+        }
+
+        private static bool TryStabilizeReplicationNeedsSleepPresentationPose(
+            string entityId,
+            float now,
+            ref Vector3 position,
+            ref Quaternion rotation)
+        {
+            if (!IsReplicationNeedsSleepPresentationActive(entityId)
+                || !ReplicationNeedsSleepPresentationV2ByEntityId.TryGetValue(entityId, out var state))
+            {
+                return false;
+            }
+
+            if (state.PoseLocked)
+            {
+                var breakDistance = position - state.LockedPosePosition;
+                if (breakDistance.sqrMagnitude
+                    <= ReplicationNeedsSleepV2PoseBreakDistance * ReplicationNeedsSleepV2PoseBreakDistance)
+                {
+                    position = state.LockedPosePosition;
+                    rotation = state.LockedPoseRotation;
+                    replicationNeedsSleepV2PoseHeldFrames++;
+                    return true;
+                }
+
+                ResetReplicationNeedsSleepPresentationPose(state);
+                replicationNeedsSleepV2PoseLockBreaks++;
+            }
+
+            if (!state.PoseCandidateInitialized)
+            {
+                state.PoseCandidateInitialized = true;
+                state.PoseCandidatePosition = position;
+                state.PoseCandidateRotation = rotation;
+                state.PoseCandidateSinceRealtime = now;
+                return true;
+            }
+
+            var candidateDistance = position - state.PoseCandidatePosition;
+            var candidateAngle = Quaternion.Angle(rotation, state.PoseCandidateRotation);
+            if (candidateDistance.sqrMagnitude
+                    > ReplicationNeedsSleepV2PoseSettleDistance * ReplicationNeedsSleepV2PoseSettleDistance
+                || candidateAngle > ReplicationNeedsSleepV2PoseSettleAngleDegrees)
+            {
+                state.PoseCandidatePosition = position;
+                state.PoseCandidateRotation = rotation;
+                state.PoseCandidateSinceRealtime = now;
+                return true;
+            }
+
+            if (now - state.PoseCandidateSinceRealtime < ReplicationNeedsSleepV2PoseSettleSeconds)
+            {
+                return true;
+            }
+
+            state.PoseLocked = true;
+            state.LockedPosePosition = position;
+            state.LockedPoseRotation = rotation;
+            replicationNeedsSleepV2PoseLocks++;
+            instance?.LogReplicationInfo("Going Cooperative sleep-v2 pose locked entityId="
+                + entityId
+                + " position=("
+                + position.x.ToString("0.000", CultureInfo.InvariantCulture) + ","
+                + position.y.ToString("0.000", CultureInfo.InvariantCulture) + ","
+                + position.z.ToString("0.000", CultureInfo.InvariantCulture) + ")");
+            return true;
+        }
+
+        private static void ResetReplicationNeedsSleepPresentationPose(ReplicationSleepPresentationV2State state)
+        {
+            state.PoseCandidateInitialized = false;
+            state.PoseCandidatePosition = default;
+            state.PoseCandidateRotation = Quaternion.identity;
+            state.PoseCandidateSinceRealtime = 0f;
+            state.PoseLocked = false;
+            state.LockedPosePosition = default;
+            state.LockedPoseRotation = Quaternion.identity;
+            state.OverlayHookPositionLocked = false;
+            state.LockedOverlayHookPosition = default;
+        }
+
+        private static void BindReplicationNeedsSleepOverlayHook(
+            string entityId,
+            object view,
+            ReplicationSleepPresentationV2State state)
+        {
+            var hook = AccessTools.Field(view.GetType(), "gameplayOverlayHook")?.GetValue(view) as Transform;
+            if (hook == null || ReferenceEquals(state.OverlayHook, hook))
+            {
+                return;
+            }
+
+            if (state.OverlayHookInstanceId != 0)
+            {
+                ReplicationNeedsSleepEntityIdByOverlayHookInstanceId.Remove(state.OverlayHookInstanceId);
+            }
+
+            state.OverlayHook = hook;
+            state.OverlayHookInstanceId = hook.GetInstanceID();
+            state.OverlayHookPositionLocked = false;
+            state.LockedOverlayHookPosition = default;
+            ReplicationNeedsSleepEntityIdByOverlayHookInstanceId[state.OverlayHookInstanceId] = entityId;
+        }
+
         private static string ApplyReplicationNeedsNativeSleepPresentation(object view)
         {
             // LifeController.FallAsleep merely raises the WorkerManager event;
@@ -727,6 +1185,11 @@ namespace GoingCooperative.Plugin.BepInEx
         private static string ApplyReplicationNeedsNativeWakePresentation(object view)
         {
             var lifecycleDetail = ApplyReplicationNeedsNativeSleepTransition(view, false);
+            return lifecycleDetail + " " + ApplyReplicationNeedsWakeVisualCleanup(view);
+        }
+
+        private static string ApplyReplicationNeedsWakeVisualCleanup(object view)
+        {
             try
             {
                 applyingRuntimeCommandDepth++;
@@ -736,7 +1199,7 @@ namespace GoingCooperative.Plugin.BepInEx
                         ?? FindReplicationInstanceMethod(view.GetType(), "ResetTriggers", Type.EmptyTypes);
                     if (method == null)
                     {
-                        return lifecycleDetail + " sleep-wake-visual-method-missing";
+                        return "sleep-wake-visual-method-missing";
                     }
 
                     method.Invoke(view, null);
@@ -746,7 +1209,7 @@ namespace GoingCooperative.Plugin.BepInEx
                         TrySetReplicationAnimatorBool(animator, "Sleeping", false);
                         TrySetReplicationAnimatorBool(animator, "IsSleeping", false);
                     }
-                    return lifecycleDetail + " sleep-wake-visual=" + method.Name;
+                    return "sleep-wake-visual=" + method.Name;
                 }
                 finally
                 {
@@ -755,7 +1218,7 @@ namespace GoingCooperative.Plugin.BepInEx
             }
             catch (Exception ex)
             {
-                return lifecycleDetail + " sleep-wake-visual-error " + FormatReflectionExceptionDetail(ex);
+                return "sleep-wake-visual-error " + FormatReflectionExceptionDetail(ex);
             }
         }
 
@@ -846,6 +1309,8 @@ namespace GoingCooperative.Plugin.BepInEx
             ReplicationNeedsEventSequenceByEntityId.Clear();
             ReplicationNeedsLastAppliedDeltaByEntityAndKind.Clear();
             ReplicationNeedsLastSleepVisualByEntityId.Clear();
+            ReplicationNeedsSleepPresentationV2ByEntityId.Clear();
+            ReplicationNeedsSleepEntityIdByOverlayHookInstanceId.Clear();
             ReplicationNeedsHostSleepSessionByEntityId.Clear();
             ReplicationPendingNeedsRepairs.Clear();
             replicationNeedsViewCache = null;
@@ -858,6 +1323,17 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationNeedsEventsSent = 0L;
             replicationNeedsEventsApplied = 0L;
             replicationNeedsRepairValuesApplied = 0L;
+            replicationNeedsSleepV2TransitionsApplied = 0L;
+            replicationNeedsSleepV2MatchedStates = 0L;
+            replicationNeedsSleepV2StatRepairsSuppressed = 0L;
+            replicationNeedsSleepV2VisualTransitionsApplied = 0L;
+            replicationNeedsSleepV2RecoveryVisualsApplied = 0L;
+            replicationNeedsSleepV2PoseLocks = 0L;
+            replicationNeedsSleepV2PoseLockBreaks = 0L;
+            replicationNeedsSleepV2PoseHeldFrames = 0L;
+            replicationNeedsSleepV2OverlayHookLocks = 0L;
+            replicationNeedsSleepV2OverlayHookHeldFrames = 0L;
+            replicationNeedsSleepV2ContradictoryNativeWritesSuppressed = 0L;
         }
 
         private static string FormatReplicationNeedsStatus()
@@ -865,7 +1341,18 @@ namespace GoingCooperative.Plugin.BepInEx
             return "needsReplication=" + replicationConfigNeedsReplication
                 + " needsEventsSent=" + replicationNeedsEventsSent
                 + " needsEventsApplied=" + replicationNeedsEventsApplied
-                + " needsRepairApplied=" + replicationNeedsRepairValuesApplied;
+                + " needsRepairApplied=" + replicationNeedsRepairValuesApplied
+                + " sleepV2Transitions=" + replicationNeedsSleepV2TransitionsApplied
+                + " sleepV2Matched=" + replicationNeedsSleepV2MatchedStates
+                + " sleepV2StatSuppressed=" + replicationNeedsSleepV2StatRepairsSuppressed
+                + " sleepV2Visuals=" + replicationNeedsSleepV2VisualTransitionsApplied
+                + " sleepV2RecoveryVisuals=" + replicationNeedsSleepV2RecoveryVisualsApplied
+                + " sleepV2PoseLocks=" + replicationNeedsSleepV2PoseLocks
+                + " sleepV2PoseBreaks=" + replicationNeedsSleepV2PoseLockBreaks
+                + " sleepV2PoseHeld=" + replicationNeedsSleepV2PoseHeldFrames
+                + " sleepV2OverlayLocks=" + replicationNeedsSleepV2OverlayHookLocks
+                + " sleepV2OverlayHeld=" + replicationNeedsSleepV2OverlayHookHeldFrames
+                + " sleepV2NativeWritesSuppressed=" + replicationNeedsSleepV2ContradictoryNativeWritesSuppressed;
         }
 
         private sealed class ReplicationPendingNeedsRepair
