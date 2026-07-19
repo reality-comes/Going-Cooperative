@@ -36,12 +36,18 @@ namespace GoingCooperative.Plugin.BepInEx
         // controller. False preserves the previous semantic work presentation.
         private static bool replicationConfigSemanticWorkCycleDriver;
         private static bool replicationConfigNeedsReplication = true;
+        // Optional, presentation-only workstation runtime lane. It never owns
+        // queue policy, resources, ticket completion, or simulation.
+        private static bool replicationConfigWorkstationRuntimePresentation;
         private static bool replicationConfigForceHostMovement;
         private static bool replicationConfigSendSnapshots = true;
         private static bool replicationConfigLogSnapshots = true;
         // Full world-delta payload logging is intentionally opt-in. Building and roof
         // records can be very large and are replicated in bursts during construction.
         private static bool replicationConfigWorldObjectDeltaDiagnostics;
+        // High-volume operational transport traces (send, queue, apply, ACK, retry).
+        // This does not affect replication, warnings/errors, or the FPS summary.
+        private static bool replicationConfigVerboseReplicationLogging;
         // Transactional placement plus sparse lifecycle replication. False restores
         // the legacy periodic full-building snapshot lane for rollback testing.
         private static bool replicationConfigBuildingReplicationV2 = true;
@@ -82,6 +88,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigEventReplication;
         private static bool replicationConfigEventSchedulerAuthority;
         private static bool replicationConfigEventTraderAuthority;
+        private static bool replicationConfigSynchronizedTrading;
         private static bool replicationConfigEventLifecycleReplication;
         private static bool replicationConfigEventDialogReplication;
         private static bool replicationConfigEventChoiceCommands;
@@ -95,6 +102,9 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigWeatherSchedulerAuthority;
         private static bool replicationConfigWeatherTemperatureReplication;
         private static bool replicationConfigEventDiagnostics;
+        // Focused bootstrap/ACK tracing for merchant party transfers. This is
+        // intentionally independent of the high-volume transport log gate.
+        private static bool replicationConfigTraderTransferDiagnostics;
         private static string replicationConfigHost = "127.0.0.1";
         private static string replicationConfigProofIntent = "speed-normal";
         private static string replicationConfigCommandCaptureMode = "send";
@@ -198,6 +208,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigSemanticWorkCycleDriver
                     + " needsReplication="
                     + replicationConfigNeedsReplication
+                    + " workstationRuntimePresentation="
+                    + replicationConfigWorkstationRuntimePresentation
                     + " interpolationMs="
                     + replicationConfigInterpolationMs.ToString(CultureInfo.InvariantCulture)
                     + " forceHostMovement="
@@ -232,6 +244,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigPerfFpsProbe
                     + " worldObjectDeltaDiagnostics="
                     + replicationConfigWorldObjectDeltaDiagnostics
+                    + " verboseReplicationLogging="
+                    + replicationConfigVerboseReplicationLogging
                     + " buildingReplicationV2="
                     + replicationConfigBuildingReplicationV2
                     + " resourcePileStateSnapshots="
@@ -266,6 +280,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigEventSchedulerAuthority
                     + " eventTraderAuthority="
                     + replicationConfigEventTraderAuthority
+                    + " synchronizedTrading="
+                    + replicationConfigSynchronizedTrading
                     + " eventLifecycleReplication="
                     + replicationConfigEventLifecycleReplication
                     + " eventDialogReplication="
@@ -292,6 +308,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigWeatherTemperatureReplication
                     + " eventDiagnostics="
                     + replicationConfigEventDiagnostics
+                    + " traderTransferDiagnostics="
+                    + replicationConfigTraderTransferDiagnostics
                     + " worldObjectDeltaApplyBudgetPerFrame="
                     + replicationConfigWorldObjectDeltaApplyBudgetPerFrame.ToString(CultureInfo.InvariantCulture)
                     + " worldObjectDeltaApplyQueueMax="
@@ -589,6 +607,11 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryParseConfigBool(value, out var eventTraderAuthority)) replicationConfigEventTraderAuthority = eventTraderAuthority;
                     else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
                     break;
+                case "synchronizedtrading":
+                case "tradinginteraction":
+                    if (TryParseConfigBool(value, out var synchronizedTrading)) replicationConfigSynchronizedTrading = synchronizedTrading;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
                 case "eventlifecyclereplication":
                 case "eventlifecycle":
                     if (TryParseConfigBool(value, out var eventLifecycleReplication)) replicationConfigEventLifecycleReplication = eventLifecycleReplication;
@@ -652,6 +675,16 @@ namespace GoingCooperative.Plugin.BepInEx
                 case "eventdiagnostics":
                 case "eventprobes":
                     if (TryParseConfigBool(value, out var eventDiagnostics)) replicationConfigEventDiagnostics = eventDiagnostics;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "tradertransferdiagnostics":
+                case "traderbootstrapdiagnostics":
+                    if (TryParseConfigBool(value, out var traderTransferDiagnostics)) replicationConfigTraderTransferDiagnostics = traderTransferDiagnostics;
+                    else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    break;
+                case "workstationruntimepresentation":
+                case "productionruntimepresentation":
+                    if (TryParseConfigBool(value, out var workstationRuntimePresentation)) replicationConfigWorkstationRuntimePresentation = workstationRuntimePresentation;
                     else LogReplicationConfigInvalidValue(current, lineNumber, key, value);
                     break;
                 case "applysnapshots":
@@ -883,6 +916,20 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryParseConfigBool(value, out var worldObjectDeltaDiagnostics))
                     {
                         replicationConfigWorldObjectDeltaDiagnostics = worldObjectDeltaDiagnostics;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+
+                case "verbosereplicationlogging":
+                case "verbosereplicationlogs":
+                case "verbosetransportlogging":
+                    if (TryParseConfigBool(value, out var verboseReplicationLogging))
+                    {
+                        replicationConfigVerboseReplicationLogging = verboseReplicationLogging;
                     }
                     else
                     {

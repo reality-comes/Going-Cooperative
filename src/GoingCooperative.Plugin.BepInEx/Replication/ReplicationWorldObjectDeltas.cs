@@ -132,6 +132,12 @@ namespace GoingCooperative.Plugin.BepInEx
             var workerSkillsExperiencePostfix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
                 nameof(ReplicationWorkerSkillsExperiencePostfix),
                 BindingFlags.Static | BindingFlags.NonPublic));
+            var workstationProgressPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationWorkstationRuntimeProgressBarPrefix),
+                BindingFlags.Static | BindingFlags.NonPublic));
+            var workstationViewPostfix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationWorkstationRuntimeItemViewPostfix),
+                BindingFlags.Static | BindingFlags.NonPublic));
 
             var patchedCount = 0;
             patchedCount += TryPatchReplicationWorldObjectDeltaMethodsByName(harmonyInstance, instancePostfix, staticPostfix, staticResultPostfix, "NSMedieval.State.MapResourceInstance", "Dispose");
@@ -164,6 +170,12 @@ namespace GoingCooperative.Plugin.BepInEx
             patchedCount += TryPatchReplicationWorldObjectDeltaMethodByTypeNames(harmonyInstance, agentProgressValuePostfix, "NSMedieval.FloatingOverlaySystem.ProgressBarFloatingElement", "UpdateValue", "System.Single");
             patchedCount += TryPatchReplicationWorldObjectDeltaMethodByTypeNames(harmonyInstance, agentActionStatusPostfix, "NSMedieval.State.WorkerBehaviour", "GoalUpdated", "System.String", "System.Boolean");
             patchedCount += TryPatchReplicationWorldObjectDeltaMethodByTypeNames(harmonyInstance, workerSkillsExperiencePostfix, "NSMedieval.Model.WorkerSkills", "AddExperience", "NSMedieval.StatsSystem.SkillType", "System.Single");
+            // This installer runs for menu-configured sessions too.  The
+            // narrower client-hook installer can run before UI role selection,
+            // which left the suppression hook absent in the prior build.
+            patchedCount += TryPatchReplicationWorldObjectDeltaPrefixByTypeNames(harmonyInstance, workstationProgressPrefix, "NSMedieval.UI.ProductionLayoutItemView", "SetProgressBarValue");
+            patchedCount += TryPatchReplicationWorldObjectDeltaMethodByTypeNames(harmonyInstance, workstationViewPostfix, "NSMedieval.UI.ProductionLayoutItemView", "SetProductionData", "NSMedieval.BuildingComponents.ProductionComponentInstance", "NSMedieval.State.ProductionInstance");
+            patchedCount += TryPatchReplicationWorldObjectDeltaMethodByTypeNames(harmonyInstance, workstationViewPostfix, "NSMedieval.UI.ProductionLayoutItemView", "SetupProgressRefactored", "NSMedieval.State.ProductionInstance");
 
             LogReplicationInfo("Going Cooperative replication world object delta capture patches="
                 + patchedCount.ToString(CultureInfo.InvariantCulture)
@@ -188,6 +200,37 @@ namespace GoingCooperative.Plugin.BepInEx
             patchedCount += TryPatchReplicationWorldObjectDeltaMethodByTypeNames(harmonyInstance, localizedCurrentActionPostfix, "NSMedieval.UI.Utils.CreatureBaseUtils", "GetLocalizedCurrentActionInfo", "NSMedieval.State.CreatureBase");
             LogReplicationInfo("Going Cooperative replication world object delta client hooks patches="
                 + patchedCount.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private int TryPatchReplicationWorldObjectDeltaPrefixByTypeNames(
+            Harmony harmonyInstance,
+            HarmonyMethod prefix,
+            string typeName,
+            string methodName,
+            params string[] parameterTypeNames)
+        {
+            var parameterTypes = new Type[parameterTypeNames.Length];
+            for (var i = 0; i < parameterTypeNames.Length; i++)
+            {
+                var parameterType = AccessTools.TypeByName(parameterTypeNames[i]);
+                if (parameterType == null) return 0;
+                parameterTypes[i] = parameterType;
+            }
+
+            try
+            {
+                var type = AccessTools.TypeByName(typeName);
+                var method = type == null ? null : AccessTools.Method(type, methodName, parameterTypes);
+                if (method == null || method.ContainsGenericParameters) return 0;
+                harmonyInstance.Patch(method, prefix: prefix);
+                AppendPluginLog("Replication world object delta patched prefix: " + type.FullName + "." + method.Name);
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                AppendPluginLog("Replication world object delta prefix patch failed: " + typeName + "." + methodName + " " + ex.GetType().Name + " " + ex.Message);
+                return 0;
+            }
         }
 
         private int TryPatchReplicationWorldObjectDeltaMethodsByName(
@@ -713,6 +756,12 @@ namespace GoingCooperative.Plugin.BepInEx
             bool isSequenced,
             string identityDetail)
         {
+            if (string.Equals(trigger, "Sleep", StringComparison.Ordinal)
+                || string.Equals(trigger, "Rest", StringComparison.Ordinal))
+            {
+                return;
+            }
+
             if (replicationConfigCombatReplication
                 && replicationConfigCombatPresentationReplication
                 && string.Equals(trigger, "Attack", StringComparison.Ordinal))
@@ -998,6 +1047,15 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var goalId = string.IsNullOrWhiteSpace(__0) ? "Idle" : __0.Trim();
+            // Sleep uses LifeController session boundaries. Sending it through
+            // the generic GOAP/action-animation lane queues a Sleep trigger
+            // after the authoritative wake and re-lays client puppets whenever
+            // their local action state changes.
+            if (string.Equals(goalId, "SleepGoal", StringComparison.Ordinal)
+                || string.Equals(goalId, "RestGoal", StringComparison.Ordinal))
+            {
+                return;
+            }
             TryEndReplicationSemanticWorkForEntity(entityId, goalId, __1);
             var statusText = NormalizeReplicationAgentActionStatusText(goalId, __1);
             var animationToken = ResolveReplicationPuppetAnimationToken(goalId, statusText);
@@ -3218,6 +3276,16 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool ShouldSkipDuplicateReplicationWorldObjectDelta(ReplicationWorldObjectDelta delta)
         {
+            if (IsReplicationTraderPartyDeltaKind(delta.DeltaKind))
+            {
+                // Trader bootstrap packets share the same generic world-object
+                // coordinates, but each chunk is distinct. Their transfer/chunk
+                // identity, reliable ACK window and semantic revision rules provide
+                // the real deduplication. The generic 500 ms key would otherwise
+                // discard every chunk after chunk zero.
+                return false;
+            }
+
             if (string.Equals(delta.DeltaKind, ReplicationBuildingLifecycleV2DeltaKind, StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, ReplicationBuildingProgressV2DeltaKind, StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, ReplicationBuildingRepairV2DeltaKind, StringComparison.Ordinal)
@@ -3494,7 +3562,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 {
                     replicationWorldObjectDeltaRetriesSent++;
                     replicationLastWorldObjectDeltaSummary = "retry " + FormatReplicationWorldObjectDelta(delta);
-                    if (!IsNoisyReplicationWorldObjectDelta(delta))
+                    if (replicationConfigVerboseReplicationLogging && !IsNoisyReplicationWorldObjectDelta(delta))
                     {
                         LogReplicationInfo("Going Cooperative replication world object delta retry " + FormatReplicationWorldObjectDelta(delta));
                     }
@@ -3503,7 +3571,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 {
                     replicationWorldObjectDeltasSent++;
                     replicationLastWorldObjectDeltaSummary = "sent " + FormatReplicationWorldObjectDelta(delta);
-                    if (!IsNoisyReplicationWorldObjectDelta(delta))
+                    if (replicationConfigVerboseReplicationLogging && !IsNoisyReplicationWorldObjectDelta(delta))
                     {
                         LogReplicationInfo("Going Cooperative replication world object delta sent " + FormatReplicationWorldObjectDelta(delta));
                     }
@@ -3633,7 +3701,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 }
 
                 SendReplicationWorldObjectDeltaAck(delta, applied: true, duplicate: false, detail: "shadow");
-                LogReplicationInfo("Going Cooperative replication world object delta shadow " + FormatReplicationWorldObjectDelta(delta));
+                if (replicationConfigVerboseReplicationLogging)
+                {
+                    LogReplicationInfo("Going Cooperative replication world object delta shadow " + FormatReplicationWorldObjectDelta(delta));
+                }
                 return;
             }
 
@@ -3673,7 +3744,7 @@ namespace GoingCooperative.Plugin.BepInEx
                         + " "
                         + FormatReplicationWorldObjectDelta(delta);
                     SendReplicationWorldObjectDeltaAck(delta, applied: false, duplicate: true, detail: duplicateDetail);
-                    if (!IsNoisyReplicationWorldObjectDelta(delta))
+                    if (replicationConfigVerboseReplicationLogging && !IsNoisyReplicationWorldObjectDelta(delta))
                     {
                         LogReplicationInfo("Going Cooperative replication world object delta duplicate detail="
                             + duplicateDetail
@@ -3713,7 +3784,7 @@ namespace GoingCooperative.Plugin.BepInEx
                         + " "
                         + FormatReplicationWorldObjectDelta(delta);
                     SendReplicationWorldObjectDeltaAck(delta, applied: false, duplicate: true, detail: duplicateDetail);
-                    if (!IsNoisyReplicationWorldObjectDelta(delta))
+                    if (replicationConfigVerboseReplicationLogging && !IsNoisyReplicationWorldObjectDelta(delta))
                     {
                         LogReplicationInfo("Going Cooperative replication world object delta duplicate detail="
                             + duplicateDetail
@@ -3810,7 +3881,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     + (string.IsNullOrEmpty(coalesceKey) ? string.Empty : " coalesceKey=" + coalesceKey)
                     + " "
                     + FormatReplicationWorldObjectDelta(delta);
-                if (!IsNoisyReplicationWorldObjectDelta(delta))
+                if (replicationConfigVerboseReplicationLogging && !IsNoisyReplicationWorldObjectDelta(delta))
                 {
                     LogReplicationInfo("Going Cooperative replication world object delta queued queue="
                         + queueCount.ToString(CultureInfo.InvariantCulture)
@@ -3953,7 +4024,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 + detail
                 + " "
                 + FormatReplicationWorldObjectDelta(delta);
-            if (!IsReplicationResourcePileStateSnapshotDelta(delta)
+            if (replicationConfigVerboseReplicationLogging
+                && !IsReplicationResourcePileStateSnapshotDelta(delta)
                 && !IsNoisyReplicationWorldObjectDelta(delta))
             {
                 LogReplicationInfo("Going Cooperative replication world object delta applied invoked="
@@ -4227,7 +4299,9 @@ namespace GoingCooperative.Plugin.BepInEx
                 + ack.Detail;
             if (!IsReplicationResourcePileStateSnapshotAckDetail(ack.Detail))
             {
-                if (!ack.Duplicate && !IsNoisyReplicationWorldObjectDeltaAckDetail(ack.Detail))
+                if (replicationConfigVerboseReplicationLogging
+                    && !ack.Duplicate
+                    && !IsNoisyReplicationWorldObjectDeltaAckDetail(ack.Detail))
                 {
                     LogReplicationInfo("Going Cooperative replication world object delta ack received sequence="
                         + ack.Sequence.ToString(CultureInfo.InvariantCulture)
@@ -4278,6 +4352,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 || string.Equals(delta.DeltaKind, ReplicationBuildingProgressV2DeltaKind, StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, "AgentActionHeartbeat", StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, "AgentProgressUpdated", StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, ReplicationWorkstationRuntimeDeltaKind, StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, "AgentAnimationTriggered", StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, "AgentAnimationReset", StringComparison.Ordinal)
                 || string.Equals(delta.DeltaKind, "AgentAnimationQuit", StringComparison.Ordinal);
@@ -4571,6 +4646,11 @@ namespace GoingCooperative.Plugin.BepInEx
             if (string.Equals(delta.DeltaKind, "AgentNeedLifecycle", StringComparison.Ordinal))
             {
                 return TryApplyReplicationNeedsLifecycleDelta(delta, out detail);
+            }
+
+            if (string.Equals(delta.DeltaKind, ReplicationWorkstationRuntimeDeltaKind, StringComparison.Ordinal))
+            {
+                return TryApplyReplicationWorkstationRuntimePresentation(delta, out detail);
             }
 
             if (string.Equals(delta.DeltaKind, "GameTimeSnapshot", StringComparison.Ordinal))
@@ -15015,6 +15095,13 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool TryFindReplicationAnimatedAgentViewByEntityId(string entityId, out object? view, out string detail)
         {
             view = null;
+            if (TryFindReplicationTraderPartyViewByNetworkId(entityId, out view, out var traderPartyDetail)
+                && view != null)
+            {
+                detail = "matched=" + traderPartyDetail;
+                return true;
+            }
+
             var views = FindReplicationAnimatedAgentViews();
             var scanned = 0;
             for (var i = 0; i < views.Length; i++)
@@ -15039,7 +15126,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 }
             }
 
-            detail = "not-found scanned=" + scanned.ToString(CultureInfo.InvariantCulture);
+            detail = "not-found scanned=" + scanned.ToString(CultureInfo.InvariantCulture)
+                + " traderParty=" + traderPartyDetail;
             return false;
         }
 
@@ -15507,6 +15595,18 @@ namespace GoingCooperative.Plugin.BepInEx
             if (string.Equals(delta.DeltaKind, ManagementDeltaKind, StringComparison.Ordinal))
             {
                 return FormatReplicationWorldObjectDeltaCoalesceKey(delta);
+            }
+
+            if (string.Equals(delta.DeltaKind, ReplicationWorkstationRuntimeDeltaKind, StringComparison.Ordinal))
+            {
+                return "WorkstationRuntime|loc="
+                    + delta.GridX.ToString(CultureInfo.InvariantCulture)
+                    + "," + delta.GridY.ToString(CultureInfo.InvariantCulture)
+                    + "," + delta.GridZ.ToString(CultureInfo.InvariantCulture)
+                    + "|ticket="
+                    + (TryReadReplicationWorldObjectDetailInt(delta.Detail, "ticketIndex", out var ticketIndex)
+                        ? ticketIndex.ToString(CultureInfo.InvariantCulture)
+                        : "unknown");
             }
 
             if (string.Equals(delta.DeltaKind, "AgentCarryResourceChanged", StringComparison.Ordinal)

@@ -85,6 +85,51 @@ namespace GoingCooperative.Plugin.BepInEx
 
         bool IRuntimeCommandActions.ApplyCustom(string payloadJson, out string detail)
         {
+            if (LockstepCommandPayloads.TryReadTraderTradeOpenRequestPayload(
+                payloadJson,
+                out var tradeOpenEpoch,
+                out var tradeOpenTraderId,
+                out var tradeOpenWorkerId,
+                out var tradeOpenRequestId))
+            {
+                return TryApplyReplicationTraderInteractionOpenRequest(
+                    tradeOpenEpoch,
+                    tradeOpenTraderId,
+                    tradeOpenWorkerId,
+                    tradeOpenRequestId,
+                    out detail);
+            }
+
+            if (LockstepCommandPayloads.TryReadTraderTradeBasketUpdatePayload(
+                payloadJson,
+                out var basketSessionId,
+                out var basketSessionRevision,
+                out var basketRequestId,
+                out var basketState))
+            {
+                return TryApplyReplicationSynchronizedTradingBasketUpdate(
+                    basketSessionId,
+                    basketSessionRevision,
+                    basketRequestId,
+                    basketState,
+                    out detail);
+            }
+
+            if (LockstepCommandPayloads.TryReadTraderTradeCommitPayload(
+                payloadJson,
+                out var tradeSessionId,
+                out var tradeRevision,
+                out var tradeRequestId,
+                out var tradeBasket))
+            {
+                return TryApplyReplicationSynchronizedTrade(
+                    tradeSessionId,
+                    tradeRevision,
+                    tradeRequestId,
+                    tradeBasket,
+                    out detail);
+            }
+
             if (LockstepCommandPayloads.TryReadGameEventOptionChosenPayload(
                 payloadJson,
                 out var eventEpoch,

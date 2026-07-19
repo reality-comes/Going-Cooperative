@@ -165,6 +165,7 @@ $applyOwnershipSource = Get-SourceMethodBlock $externalSource "private static vo
 $finalizeClientSource = Get-SourceMethodBlock $externalSource "private static void TryFinalizeClientReplicationTraderParty("
 $resetSource = Get-SourceMethodBlock $externalSource "private static void ResetReplicationTraderParties("
 $unregisterSource = Get-SourceMethodBlock $externalSource "private static void UnregisterTraderPartyBinding("
+$uidValidationSource = Get-SourceMethodBlock $externalSource "private static bool TryValidateClientTraderPartyUniqueId("
 
 Require-SourcePattern $externalSource 'ReplicationTraderPartyWireVersion\s*=\s*"trader-party-v3"' "Trader-party transport must advertise the v3 wire contract."
 Require-SourcePattern $externalSource 'ReplicationTraderPartyWriterId\s*=\s*"going-cooperative-trader-party-v3"' "Trader-party FV bundles must carry the v3 writer identity."
@@ -293,6 +294,15 @@ Require-SourcePattern $transformSource 'event-agent:' "Transform identity must r
 Require-SourcePattern $transformSource '"npc"' "Transform collection must include mapped merchant NPC views."
 Require-SourcePattern $worldDeltaSource 'TryGetReplicationTraderPartyObject\(entityId' "Agent lookup must resolve remapped event-agent IDs directly."
 Require-SourcePattern $worldDeltaSource 'HandleReplicationTraderPartyWorldDeltaAck\(ack\)' "Reliable trader transfer ACK progression is not wired."
+Require-SourcePattern $worldDeltaSource '(?s)ShouldSkipDuplicateReplicationWorldObjectDelta\(ReplicationWorldObjectDelta delta\).*?IsReplicationTraderPartyDeltaKind\(delta\.DeltaKind\).*?return false;' "Trader party chunks must bypass the generic coordinate-only duplicate filter."
+Require-SourcePattern $externalSource 'TRADER_TRANSFER_DIAGNOSTIC' "Focused trader transfer diagnostics are not identifiable in logs."
+Require-SourcePattern $externalSource 'DiagnoseTraderPartyBeginValidationFailure' "Trader Begin rejection diagnostics must identify the failed validation field."
+Require-SourcePattern $externalSource 'if\s*\(ReferenceEquals\(current,\s*null\)\)\s*return -1L;' "Trader sends must not use Unity's destroyed-object null equality for the retained plugin runtime."
+Require-SourcePattern $externalSource '(?s)!descriptor\.Detached\s*&&\s*adoptionActors\.TryGetValue\(descriptor\.NetworkId.*?descriptor\.Detached\s*&&\s*!string\.IsNullOrWhiteSpace\(descriptor\.PriorStableEntityId\)' "Attached trader actors must prefer event-native adoption before detached prior-stable identity lookup."
+Require-SourcePattern $uidValidationSource 'var\s+targetId\s*=\s*actor\.UniqueId' "Trader UID validation must be scoped to the imported actor."
+Require-SourcePattern $uidValidationSource 'targetId\s*<=\s*0' "Imported trader actors must retain positive locally allocated UIDs."
+Require-SourcePattern $uidValidationSource 'creature\.UniqueId\s*!=\s*targetId' "Trader UID validation must count only actors sharing the imported actor's UID."
+if ($uidValidationSource -match 'pair\.Key\s*<=\s*0') { throw "Trader UID validation must not reject unrelated negative settler UIDs." }
 Require-SourcePattern $pluginSource 'TryInstallReplicationExternalEventAgentHooks\(harmony\)' "Trader-party Harmony hooks are not installed."
 Require-SourcePattern $runtimeSource 'UpdateReplicationTraderPartyTransfers\(\)' "Trader-party transfer/recovery pump is not wired."
 

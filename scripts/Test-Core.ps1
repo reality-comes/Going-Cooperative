@@ -62,6 +62,7 @@ foreach ($testedGate in @(
 foreach ($disabledGate in @(
     "eventschedulerauthority",
     "eventtraderauthority",
+    "synchronizedtrading",
     "eventwarningreplication",
     "eventnoticereplication",
     "eventexternalagentlifecycle",

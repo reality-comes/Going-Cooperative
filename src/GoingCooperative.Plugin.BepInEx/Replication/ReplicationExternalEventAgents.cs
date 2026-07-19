@@ -147,9 +147,12 @@ namespace GoingCooperative.Plugin.BepInEx
             var animalStatePostfix = ExternalHarmony(nameof(ReplicationTraderAnimalStatePostfix));
             var prisonerOwnerPostfix = ExternalHarmony(nameof(ReplicationTraderPrisonerOwnerPostfix));
             var tradeOpenPrefix = ExternalHarmony(nameof(ReplicationTraderOpenTradingMenuPrefix));
+            var tradeOpenPostfix = ExternalHarmony(nameof(ReplicationTraderOpenTradingMenuPostfix));
             var tradeApplyPrefix = ExternalHarmony(nameof(ReplicationTraderApplyTradePrefix));
             var tradeApplyPostfix = ExternalHarmony(nameof(ReplicationTraderApplyTradePostfix));
+            var tradeBasketPostfix = ExternalHarmony(nameof(ReplicationTraderBasketChangedPostfix));
             var tradeTalkPrefix = ExternalHarmony(nameof(ReplicationTraderTalkPrefix));
+            var tradeMenuClickPrefix = ExternalHarmony(nameof(ReplicationTraderTradeMenuClickPrefix));
             var clientLifecyclePrefix = ExternalHarmony(nameof(ReplicationTraderClientLifecyclePrefix));
             var count = 0;
 
@@ -196,14 +199,33 @@ namespace GoingCooperative.Plugin.BepInEx
                     AccessTools.TypeByName("NSMedieval.UI.ITrader")
                 },
                 tradeOpenPrefix,
-                null);
+                tradeOpenPostfix);
             count += PatchExternalMethod(harmonyInstance, "NSMedieval.UI.TradingManager", "ApplyTrade", new[] { typeof(float) }, tradeApplyPrefix, tradeApplyPostfix);
+            count += PatchExternalMethod(
+                harmonyInstance,
+                "NSMedieval.UI.TradingManager",
+                "SetBuySellAmount",
+                new[]
+                {
+                    AccessTools.TypeByName("NSMedieval.UI.TradeResource"),
+                    AccessTools.TypeByName("NSMedieval.UI.TradeResource"),
+                    typeof(int)
+                },
+                null,
+                tradeBasketPostfix);
             count += PatchExternalMethod(
                 harmonyInstance,
                 "NSMedieval.State.TraderBehaviour",
                 "OnSettlerTalkTo",
                 new[] { AccessTools.TypeByName("NSMedieval.State.WorkerBehaviour") },
                 tradeTalkPrefix,
+                null);
+            count += PatchExternalMethod(
+                harmonyInstance,
+                "NSMedieval.AdditionalMenuItems.TradeMenuItem",
+                "OnClickCallback",
+                Type.EmptyTypes,
+                tradeMenuClickPrefix,
                 null);
 
             count += PatchExternalMethod(harmonyInstance, "NSMedieval.GameEventSystem.GameEventInstance", "Tick", new[] { typeof(float) }, clientLifecyclePrefix, null);
@@ -212,7 +234,7 @@ namespace GoingCooperative.Plugin.BepInEx
             count += PatchExternalMethod(harmonyInstance, "NSMedieval.GameEventSystem.Events.TraderEvent", "OnLoaded", new[] { typeof(bool) }, clientLifecyclePrefix, null);
             count += PatchExternalMethod(harmonyInstance, "NSMedieval.GameEventSystem.Events.MultiTraderEvent", "OnLoaded", new[] { typeof(bool) }, clientLifecyclePrefix, null);
 
-            replicationTraderPartyHooksReady = count == 15 && ValidateReplicationTraderPartyNativeSurfaces();
+            replicationTraderPartyHooksReady = count == 17 && ValidateReplicationTraderPartyNativeSurfaces();
             LogReplicationInfo("Going Cooperative trader party hooks installed count="
                 + count.ToString(CultureInfo.InvariantCulture)
                 + " ready="
@@ -438,15 +460,27 @@ namespace GoingCooperative.Plugin.BepInEx
             if (replicationConfigHostMode || replicationTraderPartyApplicationDepth > 0) return true;
             var owner = TryGetTraderOwner(otherTrader);
             if (!ShouldBlockClientTrader(owner)) return true;
+            if (SynchronizedTradingEnabled())
+            {
+                ShowReplicationTradingMessage("Waiting for the host-authoritative trading session.");
+                return false;
+            }
             ShowReplicationTraderReadOnlyMessage();
             return false;
         }
 
-        private static bool ReplicationTraderTalkPrefix(object __instance)
+        private static void ReplicationTraderOpenTradingMenuPostfix(object __instance)
+        {
+            if (!replicationConfigHostMode || replicationTraderPartyApplicationDepth > 0 || __instance == null) return;
+            TryPublishReplicationSynchronizedTradingSession(__instance);
+        }
+
+        private static bool ReplicationTraderTalkPrefix(object __instance, object? __0)
         {
             if (replicationConfigHostMode || replicationTraderPartyApplicationDepth > 0 || __instance == null) return true;
             var owner = TryGetTraderOwner(__instance);
             if (!ShouldBlockClientTrader(owner)) return true;
+            if (TryRequestReplicationTraderInteraction(__instance, __0)) return false;
             ShowReplicationTraderReadOnlyMessage();
             return false;
         }
@@ -457,6 +491,7 @@ namespace GoingCooperative.Plugin.BepInEx
             var trader = AccessTools.Field(__instance.GetType(), "trader")?.GetValue(__instance);
             var owner = TryGetTraderOwner(trader);
             if (!ShouldBlockClientTrader(owner)) return true;
+            if (TrySubmitReplicationSynchronizedTrade(__instance)) return false;
             ShowReplicationTraderReadOnlyMessage();
             return false;
         }
@@ -464,6 +499,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static void ReplicationTraderApplyTradePostfix(object __instance)
         {
             if (!replicationConfigHostMode || replicationTraderPartyApplicationDepth > 0 || __instance == null) return;
+            MarkReplicationSynchronizedTradeAppliedByHost(__instance);
             var trader = AccessTools.Field(__instance.GetType(), "trader")?.GetValue(__instance);
             var owner = TryGetTraderOwner(trader);
             if (owner == null) return;
@@ -473,6 +509,12 @@ namespace GoingCooperative.Plugin.BepInEx
                 instance?.LogReplicationWarning("Going Cooperative contained trader reconciliation failure error="
                     + ex.GetType().Name + ":" + ex.Message + "; full session resync is required.");
             }
+        }
+
+        private static void ReplicationTraderBasketChangedPostfix(object __instance)
+        {
+            if (replicationTraderPartyApplicationDepth > 0 || __instance == null) return;
+            PublishReplicationSynchronizedTradingBasketChange(__instance);
         }
 
         private static HumanoidInstance? TryGetTraderOwner(object? trader)
@@ -1095,8 +1137,33 @@ namespace GoingCooperative.Plugin.BepInEx
                     + " members=" + record.CachedMemberManifestToken
                     + " gameasm=" + record.CachedGameAssemblyMvid
                     + " sha256=" + hash);
+            if (sequence < 0L)
+            {
+                lock (ReplicationTraderPartyLock)
+                {
+                    ReplicationHostTraderPartyTransfers.Remove(transferId);
+                    record.TransferActive = false;
+                    record.BootstrapAdvertisePending = true;
+                    record.NextCheckpointRealtime = Time.realtimeSinceStartup + 2f;
+                }
+                transfer.Bundle = Array.Empty<byte>();
+                instance?.LogReplicationWarning("Going Cooperative trader party Begin send unavailable eventId="
+                    + record.EventId + " transfer=" + transferId + "; queued for retry.");
+                return;
+            }
             transfer.BeginSequence = sequence;
             BindHostTraderPartySequence(sequence, transfer, -1, ReplicationTraderPartyBeginDeltaKind);
+            LogTraderTransferDiagnostic("host-begin-sent transfer=" + transferId
+                + " sequence=" + sequence.ToString(CultureInfo.InvariantCulture)
+                + " bytes=" + bundle.Length.ToString(CultureInfo.InvariantCulture)
+                + " chunks=" + transfer.ChunkCount.ToString(CultureInfo.InvariantCulture)
+                + " humanoids=" + record.CachedHumanoidCount.ToString(CultureInfo.InvariantCulture)
+                + " animals=" + record.CachedAnimalCount.ToString(CultureInfo.InvariantCulture));
+            instance?.LogReplicationInfo("Going Cooperative trader party transfer started eventId="
+                + record.EventId
+                + " transfer=" + transferId
+                + " chunks=" + transfer.ChunkCount.ToString(CultureInfo.InvariantCulture)
+                + " source=" + source);
         }
 
         private static bool TryGetOrCreateImmutableTraderPartyBundle(
@@ -1292,7 +1359,11 @@ namespace GoingCooperative.Plugin.BepInEx
         private static long SendHostTraderPartyDelta(string kind, string eventId, int generation, string detail)
         {
             var current = instance;
-            if (current == null) return -1L;
+            // The BaseUnityPlugin component is destroyed during the main-menu scene
+            // transition while its C# runtime remains intentionally active through
+            // game-owned Harmony pumps. Unity's overloaded == reports that retained
+            // wrapper as null; only a true CLR-null reference makes sending impossible.
+            if (ReferenceEquals(current, null)) return -1L;
             var sequence = ++replicationWorldObjectDeltaSequence;
             current.SendReplicationWorldObjectDelta(new ReplicationWorldObjectDelta(
                 sequence,
@@ -1326,7 +1397,6 @@ namespace GoingCooperative.Plugin.BepInEx
             if (!replicationConfigHostMode) return;
             var positive = ack.Applied
                 || (ack.Duplicate && ack.Detail.IndexOf("duplicate-sequence", StringComparison.OrdinalIgnoreCase) >= 0);
-            if (!positive) return;
 
             HostTraderPartyTransfer? transfer;
             HostTraderPartySequenceBinding? binding;
@@ -1334,6 +1404,14 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 if (!ReplicationHostTraderPartySequenceBindings.TryGetValue(ack.Sequence, out binding)
                     || !ReplicationHostTraderPartyTransfers.TryGetValue(binding.TransferId, out transfer)) return;
+                LogTraderTransferDiagnostic("host-ack transfer=" + transfer.TransferId
+                    + " kind=" + binding.Kind
+                    + " sequence=" + ack.Sequence.ToString(CultureInfo.InvariantCulture)
+                    + " applied=" + FormatReplicationBool(ack.Applied)
+                    + " duplicate=" + FormatReplicationBool(ack.Duplicate)
+                    + " positive=" + FormatReplicationBool(positive)
+                    + " detail=" + ack.Detail);
+                if (!positive) return;
                 ReplicationHostTraderPartySequenceBindings.Remove(ack.Sequence);
                 if (binding.ChunkIndex >= 0) transfer.InFlightChunks.Remove(binding.ChunkIndex);
             }
@@ -1346,21 +1424,34 @@ namespace GoingCooperative.Plugin.BepInEx
                     return;
                 }
                 transfer.BeginAcknowledged = true;
+                LogTraderTransferDiagnostic("host-begin-accepted transfer=" + transfer.TransferId
+                    + " chunks=" + transfer.ChunkCount.ToString(CultureInfo.InvariantCulture));
                 SendHostTraderPartyChunkWindow(transfer);
                 return;
             }
             if (string.Equals(binding.Kind, ReplicationTraderPartyChunkDeltaKind, StringComparison.Ordinal))
             {
+                if ((binding.ChunkIndex + 1) % ReplicationTraderPartySendWindow == 0
+                    || binding.ChunkIndex + 1 == transfer.ChunkCount)
+                {
+                    LogTraderTransferDiagnostic("host-chunk-progress transfer=" + transfer.TransferId
+                        + " acknowledgedThrough=" + (binding.ChunkIndex + 1).ToString(CultureInfo.InvariantCulture)
+                        + "/" + transfer.ChunkCount.ToString(CultureInfo.InvariantCulture)
+                        + " next=" + transfer.NextChunkIndex.ToString(CultureInfo.InvariantCulture)
+                        + " inFlight=" + transfer.InFlightChunks.Count.ToString(CultureInfo.InvariantCulture));
+                }
                 SendHostTraderPartyChunkWindow(transfer);
                 return;
             }
             if (!string.Equals(binding.Kind, ReplicationTraderPartyCommitDeltaKind, StringComparison.Ordinal)) return;
 
+            LogTraderTransferDiagnostic("host-commit-accepted transfer=" + transfer.TransferId);
             CompleteHostTraderPartyTransfer(transfer);
         }
 
         private static void CompleteHostTraderPartyTransfer(HostTraderPartyTransfer transfer)
         {
+            List<TraderPartyAgentBinding>? committedAgents = null;
             lock (ReplicationTraderPartyLock)
             {
                 PurgeHostTraderPartyTransferSequences(transfer.TransferId);
@@ -1380,9 +1471,35 @@ namespace GoingCooperative.Plugin.BepInEx
                     // Live mutations converge through semantic deltas. Dirty full FV
                     // state remains deferred until a future compatible hello/epoch.
                     record.NextCheckpointRealtime = float.PositiveInfinity;
+                    committedAgents = record.Agents
+                        .Where(binding => !binding.Tombstoned && binding.Agent != null)
+                        .ToList();
                 }
             }
             transfer.Bundle = Array.Empty<byte>();
+
+            var current = instance;
+            if (current != null && committedAgents != null)
+            {
+                // Early live-state packets can arrive while the client is still
+                // importing the FV bundle and correctly reject as actor-missing.
+                // Once commit is acknowledged, replay the authoritative state lanes
+                // against actors that are now guaranteed to exist on the client.
+                for (var i = 0; i < committedAgents.Count; i++)
+                {
+                    var binding = committedAgents[i];
+                    SendHostReplicationTraderPartyAgentState(binding.Agent, "bootstrap-commit");
+                    if (binding.Agent is AnimalInstance animal)
+                        current.SendHostReplicationAnimalState(animal, "trader-bootstrap-commit");
+                    current.SendCombatHealthDelta(binding.Agent, binding.NetworkId, "trader-bootstrap-commit");
+                }
+                replicationResourceContainerNextCheckpointRealtime = 0f;
+            }
+
+            current?.LogReplicationInfo("Going Cooperative trader party transfer completed eventId="
+                + transfer.EventId
+                + " transfer=" + transfer.TransferId
+                + " agents=" + (committedAgents?.Count ?? 0).ToString(CultureInfo.InvariantCulture));
         }
 
         private static void SendHostTraderPartyChunkWindow(HostTraderPartyTransfer transfer)
@@ -1430,6 +1547,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static void UpdateReplicationTraderPartyTransfers()
         {
             var now = Time.realtimeSinceStartup;
+            UpdateReplicationTraderInteraction(now);
             if (replicationConfigHostMode)
             {
                 ProcessPendingHostTraderPartyAborts();
@@ -1625,6 +1743,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static void ExpireHostTraderPartyTransfers(float now)
         {
             var expired = new List<string>();
+            var expiredDiagnostics = new List<string>();
             lock (ReplicationTraderPartyLock)
             {
                 foreach (var pair in ReplicationHostTraderPartyTransfers)
@@ -1632,6 +1751,12 @@ namespace GoingCooperative.Plugin.BepInEx
                 for (var i = 0; i < expired.Count; i++)
                 {
                     var transfer = ReplicationHostTraderPartyTransfers[expired[i]];
+                    expiredDiagnostics.Add("transfer=" + transfer.TransferId
+                        + " beginAcknowledged=" + FormatReplicationBool(transfer.BeginAcknowledged)
+                        + " nextChunk=" + transfer.NextChunkIndex.ToString(CultureInfo.InvariantCulture)
+                        + "/" + transfer.ChunkCount.ToString(CultureInfo.InvariantCulture)
+                        + " inFlight=" + transfer.InFlightChunks.Count.ToString(CultureInfo.InvariantCulture)
+                        + " commitSent=" + FormatReplicationBool(transfer.CommitSent));
                     ReplicationHostTraderPartyTransfers.Remove(expired[i]);
                     PurgeHostTraderPartyTransferSequences(transfer.TransferId);
                     if (ReplicationHostTraderParties.TryGetValue(transfer.EventId, out var record))
@@ -1641,6 +1766,14 @@ namespace GoingCooperative.Plugin.BepInEx
                         record.NextCheckpointRealtime = now + 2f;
                     }
                 }
+            }
+            if (expired.Count > 0)
+            {
+                for (var i = 0; i < expiredDiagnostics.Count; i++)
+                    LogTraderTransferDiagnostic("host-timeout " + expiredDiagnostics[i]);
+                instance?.LogReplicationWarning("Going Cooperative trader party transfer expired count="
+                    + expired.Count.ToString(CultureInfo.InvariantCulture)
+                    + "; queued for retry.");
             }
         }
 
@@ -1688,11 +1821,21 @@ namespace GoingCooperative.Plugin.BepInEx
                 || string.Equals(kind, ReplicationTraderPartyAgentStateDeltaKind, StringComparison.Ordinal)
                 || string.Equals(kind, ReplicationTraderPartyTombstoneDeltaKind, StringComparison.Ordinal)
                 || string.Equals(kind, ReplicationTraderPartyMemberAdoptDeltaKind, StringComparison.Ordinal)
-                || string.Equals(kind, ReplicationTraderPartyAbortDeltaKind, StringComparison.Ordinal);
+                || string.Equals(kind, ReplicationTraderPartyAbortDeltaKind, StringComparison.Ordinal)
+                || string.Equals(kind, ReplicationTradingSessionOpenDeltaKind, StringComparison.Ordinal)
+                || string.Equals(kind, ReplicationTradingBasketStateDeltaKind, StringComparison.Ordinal)
+                || string.Equals(kind, ReplicationTradingResultDeltaKind, StringComparison.Ordinal)
+                || string.Equals(kind, ReplicationTraderInteractionResultDeltaKind, StringComparison.Ordinal);
         }
 
         private static bool TryApplyReplicationTraderPartyWorldDelta(ReplicationWorldObjectDelta delta, out string detail)
         {
+            if (string.Equals(delta.DeltaKind, ReplicationTraderInteractionResultDeltaKind, StringComparison.Ordinal))
+                return TryApplyReplicationTraderInteractionResult(delta, out detail);
+            if (string.Equals(delta.DeltaKind, ReplicationTradingSessionOpenDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, ReplicationTradingBasketStateDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, ReplicationTradingResultDeltaKind, StringComparison.Ordinal))
+                return TryApplyReplicationTradingWorldDelta(delta, out detail);
             if (replicationConfigHostMode || !TraderEventAuthorityEnabled())
             {
                 detail = "trader-party-lane-disabled";
@@ -1704,22 +1847,49 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
             if (!TryAcceptReplicationEventScope(scope, epoch, out detail)) return false;
+            bool applied;
             if (string.Equals(delta.DeltaKind, ReplicationTraderPartyBeginDeltaKind, StringComparison.Ordinal))
-                return TryApplyReplicationTraderPartyBegin(delta, out detail);
-            if (string.Equals(delta.DeltaKind, ReplicationTraderPartyChunkDeltaKind, StringComparison.Ordinal))
-                return TryApplyReplicationTraderPartyChunk(delta, out detail);
-            if (string.Equals(delta.DeltaKind, ReplicationTraderPartyCommitDeltaKind, StringComparison.Ordinal))
-                return TryApplyReplicationTraderPartyCommit(delta, out detail);
-            if (string.Equals(delta.DeltaKind, ReplicationTraderPartyAgentStateDeltaKind, StringComparison.Ordinal))
-                return TryApplyReplicationTraderPartyAgentState(delta, out detail);
-            if (string.Equals(delta.DeltaKind, ReplicationTraderPartyTombstoneDeltaKind, StringComparison.Ordinal))
-                return TryApplyReplicationTraderPartyTombstone(delta, out detail);
-            if (string.Equals(delta.DeltaKind, ReplicationTraderPartyMemberAdoptDeltaKind, StringComparison.Ordinal))
-                return TryApplyReplicationTraderPartyMemberAdopt(delta, out detail);
-            if (string.Equals(delta.DeltaKind, ReplicationTraderPartyAbortDeltaKind, StringComparison.Ordinal))
-                return TryApplyReplicationTraderPartyAbort(delta, out detail);
-            detail = "trader-party-unsupported-kind";
-            return false;
+                applied = TryApplyReplicationTraderPartyBegin(delta, out detail);
+            else if (string.Equals(delta.DeltaKind, ReplicationTraderPartyChunkDeltaKind, StringComparison.Ordinal))
+                applied = TryApplyReplicationTraderPartyChunk(delta, out detail);
+            else if (string.Equals(delta.DeltaKind, ReplicationTraderPartyCommitDeltaKind, StringComparison.Ordinal))
+                applied = TryApplyReplicationTraderPartyCommit(delta, out detail);
+            else if (string.Equals(delta.DeltaKind, ReplicationTraderPartyAgentStateDeltaKind, StringComparison.Ordinal))
+                applied = TryApplyReplicationTraderPartyAgentState(delta, out detail);
+            else if (string.Equals(delta.DeltaKind, ReplicationTraderPartyTombstoneDeltaKind, StringComparison.Ordinal))
+                applied = TryApplyReplicationTraderPartyTombstone(delta, out detail);
+            else if (string.Equals(delta.DeltaKind, ReplicationTraderPartyMemberAdoptDeltaKind, StringComparison.Ordinal))
+                applied = TryApplyReplicationTraderPartyMemberAdopt(delta, out detail);
+            else if (string.Equals(delta.DeltaKind, ReplicationTraderPartyAbortDeltaKind, StringComparison.Ordinal))
+                applied = TryApplyReplicationTraderPartyAbort(delta, out detail);
+            else
+            {
+                detail = "trader-party-unsupported-kind";
+                applied = false;
+            }
+
+            var chunkIndex = -1;
+            var chunkCount = 0;
+            var logChunkProgress = applied
+                && string.Equals(delta.DeltaKind, ReplicationTraderPartyChunkDeltaKind, StringComparison.Ordinal)
+                && TryReadReplicationWorldObjectDetailInt(delta.Detail, "index", out chunkIndex)
+                && TryReadReplicationWorldObjectDetailInt(delta.Detail, "chunks", out chunkCount)
+                && ((chunkIndex + 1) % ReplicationTraderPartySendWindow == 0 || chunkIndex + 1 == chunkCount);
+            if (!applied
+                || string.Equals(delta.DeltaKind, ReplicationTraderPartyBeginDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, ReplicationTraderPartyCommitDeltaKind, StringComparison.Ordinal)
+                || logChunkProgress)
+            {
+                LogTraderTransferDiagnostic("client-apply kind=" + delta.DeltaKind
+                    + " sequence=" + delta.Sequence.ToString(CultureInfo.InvariantCulture)
+                    + " applied=" + FormatReplicationBool(applied)
+                    + " detail=" + detail
+                    + (logChunkProgress
+                        ? " progress=" + (chunkIndex + 1).ToString(CultureInfo.InvariantCulture)
+                            + "/" + chunkCount.ToString(CultureInfo.InvariantCulture)
+                        : string.Empty));
+            }
+            return applied;
         }
 
         private static bool TryApplyReplicationTraderPartyAbort(ReplicationWorldObjectDelta delta, out string detail)
@@ -1923,7 +2093,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 || !IsTraderPartyGameAssemblyMvid(gameAssemblyMvid)
                 || !string.Equals(gameAssemblyMvid, GetReplicationGameAssemblyModuleVersionId(), StringComparison.Ordinal))
             {
-                detail = "trader-party-begin-malformed";
+                detail = "trader-party-begin-malformed reason=" + DiagnoseTraderPartyBeginValidationFailure(delta.Detail);
                 return false;
             }
             if (!TryDecodeTraderPartyMemberManifest(memberManifestToken, eventId, partyGeneration, humanoids + animals, out var memberNetworkIds))
@@ -2476,7 +2646,8 @@ namespace GoingCooperative.Plugin.BepInEx
                         descriptor.AdoptedExisting = true;
                         descriptor.SpawnedByReplication = false;
                         if (!TryValidateClientTraderPartyUniqueId(existing, out var uidDetail))
-                            throw new InvalidDataException("Adopted actor UID is not globally unique: " + uidDetail);
+                            throw new InvalidDataException("Adopted actor UID is not globally unique role="
+                                + descriptor.Role + " entityId=" + descriptor.NetworkId + ": " + uidDetail);
                         actorSnapshots.Add(new TraderPartyActorSnapshot
                         {
                             Actor = existing,
@@ -2610,8 +2781,12 @@ namespace GoingCooperative.Plugin.BepInEx
                 }
 
                 for (var i = 0; i < plannedBindings.Count; i++)
-                    if (!TryValidateClientTraderPartyUniqueId(plannedBindings[i].Agent, out var finalUidDetail))
-                        throw new InvalidDataException("Committed actor UID validation failed: " + finalUidDetail);
+                {
+                    var binding = plannedBindings[i];
+                    if (!TryValidateClientTraderPartyUniqueId(binding.Agent, out var finalUidDetail))
+                        throw new InvalidDataException("Committed actor UID validation failed role="
+                            + binding.Role + " entityId=" + binding.NetworkId + ": " + finalUidDetail);
+                }
 
                 // Quarantine is last. There are no destructive manifest-prune calls
                 // after it; actor removal is exclusively an explicit tombstone lane.
@@ -2918,7 +3093,22 @@ namespace GoingCooperative.Plugin.BepInEx
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(descriptor.PriorStableEntityId)
+            // Attached trader-event actors have a session-scoped event identity.
+            // Their host numeric UID is not globally meaningful and can legitimately
+            // collide with an unrelated client creature. Prefer the exact native
+            // event actor when the client already created one; otherwise the caller
+            // will spawn the transferred actor with a fresh local UID.
+            if (!descriptor.Detached
+                && adoptionActors.TryGetValue(descriptor.NetworkId, out var nativeEventActor))
+            {
+                actor = ValidateAdoption(nativeEventActor, "native-import");
+                return actor != null;
+            }
+
+            // Prior stable identity is valid only for detached stock, which represents
+            // a globally integrated animal/prisoner purchased from an earlier party.
+            if (descriptor.Detached
+                && !string.IsNullOrWhiteSpace(descriptor.PriorStableEntityId)
                 && TryFindReplicationAgentOwnerByEntityId(descriptor.PriorStableEntityId, out var priorOwner, out _))
             {
                 actor = ValidateAdoption(priorOwner as CreatureBase, "prior-stable");
@@ -2928,16 +3118,15 @@ namespace GoingCooperative.Plugin.BepInEx
             var adoptionKey = FormatTraderPartyDetachedAdoptionKey(
                 descriptor.HostUniqueId, descriptor.Fingerprint, descriptor.Role);
             lock (ReplicationTraderPartyLock)
-                if (ReplicationDetachedTraderPartyAdoptions.TryGetValue(adoptionKey, out var weak)
+                if (descriptor.Detached
+                    && ReplicationDetachedTraderPartyAdoptions.TryGetValue(adoptionKey, out var weak)
                     && weak.Target is CreatureBase detachedActor)
                 {
                     actor = ValidateAdoption(detachedActor, "same-world-orphan");
                     if (actor != null) return true;
                 }
 
-            if (!adoptionActors.TryGetValue(descriptor.NetworkId, out var adopted)) return false;
-            actor = ValidateAdoption(adopted, "native-import");
-            return actor != null;
+            return false;
         }
 
         private static void ResetTraderPartyLocalUniqueId(CreatureBase creature)
@@ -2957,37 +3146,33 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryValidateClientTraderPartyUniqueId(CreatureBase actor, out string detail)
         {
-            var all = new HashSet<object>(ExternalReferenceComparer.Instance);
-            var byId = new Dictionary<int, List<CreatureBase>>();
+            var targetId = actor.UniqueId;
+            if (targetId <= 0)
+            {
+                detail = "actor-uid-invalid id=" + targetId.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
+
+            // Settlers legitimately use negative UIDs. Validate only the imported
+            // actor's positive local identity instead of treating unrelated colony
+            // identities as trader-party collisions.
+            var seen = new HashSet<object>(ExternalReferenceComparer.Instance);
+            var matches = new List<CreatureBase>();
             void Add(CreatureBase? creature)
             {
-                if (creature == null || !all.Add(creature)) return;
-                var id = creature.UniqueId;
-                if (!byId.TryGetValue(id, out var values))
-                {
-                    values = new List<CreatureBase>();
-                    byId[id] = values;
-                }
-                values.Add(creature);
+                if (creature == null || !seen.Add(creature) || creature.UniqueId != targetId) return;
+                matches.Add(creature);
             }
             foreach (var worker in GlobalSaveController.CurrentVillageData.Workers) Add(worker);
             foreach (var npc in GlobalSaveController.CurrentVillageData.NPCs) Add(npc);
             foreach (var animal in GlobalSaveController.CurrentVillageData.Animals) Add(animal);
-            var collision = byId.FirstOrDefault(pair => pair.Key <= 0 || pair.Value.Count != 1);
-            if (collision.Value != null)
+            if (matches.Count != 1 || !ReferenceEquals(matches[0], actor))
             {
-                detail = "global-uid-collision id=" + collision.Key.ToString(CultureInfo.InvariantCulture)
-                    + " count=" + collision.Value.Count.ToString(CultureInfo.InvariantCulture);
+                detail = "actor-uid-not-globally-unique id=" + targetId.ToString(CultureInfo.InvariantCulture)
+                    + " matches=" + matches.Count.ToString(CultureInfo.InvariantCulture);
                 return false;
             }
-            if (!byId.TryGetValue(actor.UniqueId, out var match)
-                || match.Count != 1
-                || !ReferenceEquals(match[0], actor))
-            {
-                detail = "adoption-uid-not-globally-unique id=" + actor.UniqueId.ToString(CultureInfo.InvariantCulture);
-                return false;
-            }
-            detail = "ok uid=" + actor.UniqueId.ToString(CultureInfo.InvariantCulture);
+            detail = "ok uid=" + targetId.ToString(CultureInfo.InvariantCulture);
             return true;
         }
 
@@ -4129,6 +4314,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 ReplicationClientTerminalTraderPartyOrder.Clear();
             }
             ReplicationClientTraderPartyTracker.Reset();
+            ResetReplicationTraderInteraction();
+            ResetReplicationSynchronizedTrading();
             replicationTraderPartyApplicationDepth = 0;
             replicationTraderPartyTransferCounter = 0L;
             replicationNextTraderPartyCheckpointRealtime = 0f;
@@ -4195,6 +4382,52 @@ namespace GoingCooperative.Plugin.BepInEx
             }
             owner = null;
             return false;
+        }
+
+        // Imported trader-party actors are deliberately kept out of the normal
+        // colony animated-view scan.  Follow their native manager ownership
+        // instead: downstream state lanes (animal state, resources, health)
+        // must resolve the same view that the party importer created.
+        private static bool TryFindReplicationTraderPartyViewByNetworkId(string networkId, out object? view, out string detail)
+        {
+            view = null;
+            if (string.IsNullOrWhiteSpace(networkId)
+                || !networkId.StartsWith("event-agent:", StringComparison.Ordinal))
+            {
+                detail = "not-event-agent";
+                return false;
+            }
+
+            if (!TryGetReplicationTraderPartyObject(networkId, out var owner) || owner == null)
+            {
+                detail = "event-agent-not-registered";
+                return false;
+            }
+
+            try
+            {
+                if (owner is HumanoidInstance humanoid)
+                {
+                    view = NPCManager.Instance == null ? null : NPCManager.Instance.GetView(humanoid);
+                    detail = view == null ? "event-agent-npc-view-missing" : "event-agent-npc-manager";
+                    return view != null;
+                }
+
+                if (owner is AnimalInstance animal)
+                {
+                    view = AnimalManager.Instance == null ? null : AnimalManager.Instance.GetView(animal);
+                    detail = view == null ? "event-agent-animal-view-missing" : "event-agent-animal-manager";
+                    return view != null;
+                }
+
+                detail = "event-agent-unsupported-owner=" + FormatShortTypeName(owner.GetType());
+                return false;
+            }
+            catch (Exception ex)
+            {
+                detail = "event-agent-manager-view-error=" + FormatReflectionExceptionDetail(ex);
+                return false;
+            }
         }
 
         private static void RegisterTraderPartyBinding(TraderPartyAgentBinding binding)
@@ -4441,8 +4674,63 @@ namespace GoingCooperative.Plugin.BepInEx
                 + " epoch=" + replicationEventHostEpoch.ToString(CultureInfo.InvariantCulture);
         }
 
+        private static void LogTraderTransferDiagnostic(string message)
+        {
+            if (!replicationConfigTraderTransferDiagnostics) return;
+            instance?.LogReplicationInfo("Going Cooperative TRADER_TRANSFER_DIAGNOSTIC " + message);
+        }
+
+        private static string DiagnoseTraderPartyBeginValidationFailure(string detail)
+        {
+            if (!TryReadTraderPartyWire(detail, out _)) return "wire-or-transfer";
+            if (!TryReadTraderPartyText(detail, "eventIdB64", out var eventId) || string.IsNullOrWhiteSpace(eventId)) return "event-id";
+            if (!TryReadReplicationWorldObjectDetailInt(detail, "generation", out var generation) || generation <= 0) return "generation";
+            if (!TryReadReplicationWorldObjectDetailInt(detail, "partyGeneration", out var partyGeneration) || partyGeneration <= 0) return "party-generation";
+            if (!TryReadReplicationWorldObjectDetailInt(detail, "bytes", out var bytes)
+                || bytes <= 0 || bytes > ReplicationTraderPartyMaxBundleBytes) return "bytes";
+            if (!TryReadReplicationWorldObjectDetailInt(detail, "chunks", out var chunks)
+                || chunks <= 0 || chunks > ReplicationTraderPartyMaxChunks
+                || chunks != (bytes + ReplicationTraderPartyRawChunkBytes - 1) / ReplicationTraderPartyRawChunkBytes) return "chunks";
+            if (!TryReadReplicationWorldObjectDetailInt(detail, "humanoids", out var humanoids)
+                || humanoids < 0 || humanoids > ReplicationTraderPartyMaxHumanoids) return "humanoids";
+            if (!TryReadReplicationWorldObjectDetailInt(detail, "animals", out var animals)
+                || animals < 0 || animals > ReplicationTraderPartyMaxAnimals
+                || humanoids + animals < 1) return "animals-or-empty-party";
+            if (!TryReadReplicationWorldObjectDetailToken(detail, "members", out _)) return "member-manifest-token";
+            if (!TryReadReplicationWorldObjectDetailToken(detail, "gameasm", out var gameAssemblyMvid)
+                || !IsTraderPartyGameAssemblyMvid(gameAssemblyMvid)) return "game-assembly-mvid-format";
+            var localGameAssemblyMvid = GetReplicationGameAssemblyModuleVersionId();
+            if (!string.Equals(gameAssemblyMvid, localGameAssemblyMvid, StringComparison.Ordinal))
+                return "game-assembly-mvid-mismatch remote=" + gameAssemblyMvid + " local=" + localGameAssemblyMvid;
+            if (!TryReadReplicationWorldObjectDetailToken(detail, "sha256", out var hash)
+                || !IsTraderPartySha256(hash)) return "sha256";
+            return "unknown";
+        }
+
         private static string FormatReplicationTraderPartyWorldDeltaKey(ReplicationWorldObjectDelta delta)
         {
+            if (string.Equals(delta.DeltaKind, ReplicationTraderInteractionResultDeltaKind, StringComparison.Ordinal))
+            {
+                if (!TryReadReplicationTradingText(delta.Detail, "requestB64", out var requestId)) return string.Empty;
+                return delta.DeltaKind
+                    + "|requestLength=" + requestId.Length.ToString(CultureInfo.InvariantCulture)
+                    + "|request=" + requestId;
+            }
+            if (string.Equals(delta.DeltaKind, ReplicationTradingSessionOpenDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, ReplicationTradingBasketStateDeltaKind, StringComparison.Ordinal)
+                || string.Equals(delta.DeltaKind, ReplicationTradingResultDeltaKind, StringComparison.Ordinal))
+            {
+                if (!TryReadReplicationTradingText(delta.Detail, "sessionB64", out var sessionId)
+                    || !TryReadReplicationWorldObjectDetailLong(delta.Detail, "revision", out var revision)) return string.Empty;
+                var key = delta.DeltaKind
+                    + "|sessionLength=" + sessionId.Length.ToString(CultureInfo.InvariantCulture)
+                    + "|session=" + sessionId
+                    + "|revision=" + revision.ToString(CultureInfo.InvariantCulture);
+                if (string.Equals(delta.DeltaKind, ReplicationTradingResultDeltaKind, StringComparison.Ordinal)
+                    && TryReadReplicationTradingText(delta.Detail, "requestB64", out var requestId))
+                    key += "|requestLength=" + requestId.Length.ToString(CultureInfo.InvariantCulture) + "|request=" + requestId;
+                return key;
+            }
             if (string.Equals(delta.DeltaKind, ReplicationTraderPartyAbortDeltaKind, StringComparison.Ordinal))
             {
                 if (!TryReadTraderPartyText(delta.Detail, "eventIdB64", out var abortedEventId)) return string.Empty;

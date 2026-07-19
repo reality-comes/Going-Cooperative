@@ -41,6 +41,49 @@ internal static class CorePolicyTests
         Equal(LockstepCommandPayloads.NormalSpeedIndex, normalSpeedIndex, "normal speed index");
         Equal(LockstepCommandPayloads.SetSpeedNormalAction, normalSpeedAction, "normal speed action");
 
+        var tradeCommit = LockstepCommandPayloads.CreateTraderTradeCommitPayload(
+            "scope:trade:7",
+            7L,
+            "request-1",
+            "0,2,5,abcdef;3,-1,-2,012345");
+        Equal(true, LockstepCommandPayloads.TryReadTraderTradeCommitPayload(
+            tradeCommit,
+            out var tradeSession,
+            out var tradeRevision,
+            out var tradeRequest,
+            out var tradeBasket), "trade commit payload parses");
+        Equal("scope:trade:7", tradeSession, "trade session roundtrip");
+        Equal(7L, tradeRevision, "trade revision roundtrip");
+        Equal("request-1", tradeRequest, "trade request roundtrip");
+        Equal("0,2,5,abcdef;3,-1,-2,012345", tradeBasket, "trade basket roundtrip");
+        Equal(false, LockstepCommandPayloads.TryReadTraderTradeCommitPayload(
+            LockstepCommandPayloads.CreateTraderTradeCommitPayload("scope", 0L, "request", "0,0,1,x"),
+            out _, out _, out _, out _), "trade revision must be positive");
+        var basketUpdate = LockstepCommandPayloads.CreateTraderTradeBasketUpdatePayload(
+            "scope:trade:7", 7L, "basket-request", "0,2,5,abcdef");
+        Equal(true, LockstepCommandPayloads.TryReadTraderTradeBasketUpdatePayload(
+            basketUpdate,
+            out var basketSession,
+            out var basketSessionRevision,
+            out var basketRequest,
+            out var basketState), "trade basket update payload parses");
+        Equal("scope:trade:7", basketSession, "trade basket session roundtrip");
+        Equal(7L, basketSessionRevision, "trade basket session revision roundtrip");
+        Equal("basket-request", basketRequest, "trade basket request roundtrip");
+        Equal("0,2,5,abcdef", basketState, "trade basket state roundtrip");
+        var tradeOpenRequest = LockstepCommandPayloads.CreateTraderTradeOpenRequestPayload(
+            4L, "event:trader:1", "uid:17", "open-request-1");
+        Equal(true, LockstepCommandPayloads.TryReadTraderTradeOpenRequestPayload(
+            tradeOpenRequest,
+            out var tradeOpenEpoch,
+            out var tradeOpenTrader,
+            out var tradeOpenWorker,
+            out var tradeOpenRequestId), "trade open request payload parses");
+        Equal(4L, tradeOpenEpoch, "trade open epoch roundtrip");
+        Equal("event:trader:1", tradeOpenTrader, "trade open trader roundtrip");
+        Equal("uid:17", tradeOpenWorker, "trade open worker roundtrip");
+        Equal("open-request-1", tradeOpenRequestId, "trade open request id roundtrip");
+
         var buildBatchRecords = new[]
         {
             "N,10,5,-4,90",

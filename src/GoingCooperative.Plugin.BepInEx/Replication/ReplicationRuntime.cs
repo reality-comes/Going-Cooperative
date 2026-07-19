@@ -204,6 +204,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     SendHostReplicationAgentActionHeartbeatIfDue();
                     SendHostReplicationAgentCharacterStateSnapshotIfDue();
                     UpdateReplicationBuildingLifecycleV2();
+                    UpdateReplicationWorkstationRuntimePresentation();
                     SendHostReplicationBuildingStateSnapshotIfDue();
                     SendHostReplicationGameTimeSnapshotIfDue();
                     UpdateReplicationAnimalState();
@@ -252,6 +253,7 @@ namespace GoingCooperative.Plugin.BepInEx
             ResetReplicationEventRuntimeState(traderPartyResetContext);
             ResetReplicationSemanticAgentMotionPresentation();
             ResetReplicationSemanticAgentWorkPresentation();
+            ResetReplicationWorkstationRuntimePresentation();
             ResetReplicationAnimalStateRuntime();
             ClearReplicationBuildBatchRuntimeState();
             replicationNextHelloLogRealtime = 0f;
@@ -875,14 +877,15 @@ namespace GoingCooperative.Plugin.BepInEx
                 + (replicationConfigWeatherTemperatureReplication ? "1" : "0")
                 + (string.Equals(replicationConfigWorldObjectDeltaMode, "apply", StringComparison.OrdinalIgnoreCase) ? "1" : "0")
                 + (IsReplicationCaptureModeSendEnabled(replicationConfigCommandCaptureMode) ? "1" : "0")
-                + ":6";
+                + (replicationConfigSynchronizedTrading ? "1" : "0")
+                + ":7";
         }
 
         private static bool TryReadReplicationEventCapabilityFingerprint(string buildHash, out string fingerprint)
         {
             if (!TryReadReplicationCapabilitySegment(buildHash, "events", out fingerprint)) return false;
-            if (fingerprint.Length != 20 || fingerprint[18] != ':' || fingerprint[19] != '6') return false;
-            for (var i = 0; i < 18; i++)
+            if (fingerprint.Length != 21 || fingerprint[19] != ':' || fingerprint[20] != '7') return false;
+            for (var i = 0; i < 19; i++)
             {
                 if (fingerprint[i] != '0' && fingerprint[i] != '1') return false;
             }

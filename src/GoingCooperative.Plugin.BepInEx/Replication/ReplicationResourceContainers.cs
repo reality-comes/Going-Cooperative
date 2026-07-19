@@ -294,6 +294,7 @@ namespace GoingCooperative.Plugin.BepInEx
             states = new List<ReplicationResourceContainerState>();
             var agentContainers = 0;
             var pileContainers = 0;
+            var productionContainers = 0;
             var skipped = 0;
 
             if (Time.realtimeSinceStartup >= replicationResourceContainerNextViewRefreshRealtime
@@ -354,11 +355,15 @@ namespace GoingCooperative.Plugin.BepInEx
                 pileDetail = "pile-collect-failed " + pileDetail;
             }
 
+            CollectReplicationProductionStorageContainers(states, ref productionContainers);
+
             states.Sort((left, right) => string.Compare(left.ContainerId, right.ContainerId, StringComparison.Ordinal));
             detail = "agents="
                 + agentContainers.ToString(CultureInfo.InvariantCulture)
                 + " piles="
                 + pileContainers.ToString(CultureInfo.InvariantCulture)
+                + " production="
+                + productionContainers.ToString(CultureInfo.InvariantCulture)
                 + " skippedViews="
                 + skipped.ToString(CultureInfo.InvariantCulture)
                 + " "
@@ -397,6 +402,64 @@ namespace GoingCooperative.Plugin.BepInEx
                 0,
                 0,
                 0,
+                entries));
+            count++;
+        }
+
+        private static void CollectReplicationProductionStorageContainers(
+            List<ReplicationResourceContainerState> states,
+            ref int count)
+        {
+            var viewType = HarmonyLib.AccessTools.TypeByName("NSMedieval.BuildingComponents.BaseBuildingViewComponent");
+            var componentType = HarmonyLib.AccessTools.TypeByName("NSMedieval.BuildingComponents.ProductionComponentInstance");
+            if (viewType == null || componentType == null) return;
+
+            var views = Resources.FindObjectsOfTypeAll(viewType);
+            for (var i = 0; i < views.Length; i++)
+            {
+                var view = views[i];
+                if (view == null || !TryResolveReplicationBuildingCandidateInstance(view, out var building, out _) || building == null
+                    || !TryGetReplicationProductionSystem(building, componentType, out var system) || system == null
+                    || !TryResolveProductionSystemGrid(system, out var x, out var y, out var z, out _)
+                    || !TryGetListMember(system, "productions", out var queue))
+                {
+                    continue;
+                }
+
+                for (var ticketIndex = 0; ticketIndex < queue.Count; ticketIndex++)
+                {
+                    var ticket = queue[ticketIndex];
+                    if (ticket == null) continue;
+                    CollectReplicationProductionStorageContainer(states, ticket, "Storage", "production-primary", x, y, z, ticketIndex, ref count);
+                    CollectReplicationProductionStorageContainer(states, ticket, "SecondaryIngredientStorage", "production-secondary", x, y, z, ticketIndex, ref count);
+                }
+            }
+        }
+
+        private static void CollectReplicationProductionStorageContainer(
+            List<ReplicationResourceContainerState> states,
+            object ticket,
+            string memberName,
+            string kind,
+            int x,
+            int y,
+            int z,
+            int ticketIndex,
+            ref int count)
+        {
+            if (!TryReadInstanceMemberValue(ticket, memberName, out var storage) || storage == null
+                || !TryReadReplicationStorageEntries(storage, out var entries, out _))
+            {
+                return;
+            }
+
+            states.Add(new ReplicationResourceContainerState(
+                "production:" + x.ToString(CultureInfo.InvariantCulture) + ":" + y.ToString(CultureInfo.InvariantCulture) + ":" + z.ToString(CultureInfo.InvariantCulture)
+                    + ":" + ticketIndex.ToString(CultureInfo.InvariantCulture) + ":" + kind,
+                kind,
+                ticketIndex.ToString(CultureInfo.InvariantCulture),
+                0L,
+                x, y, z,
                 entries));
             count++;
         }
@@ -492,6 +555,11 @@ namespace GoingCooperative.Plugin.BepInEx
                 return TryApplyReplicationAgentStorageContainer(state, out detail);
             }
 
+            if (state.ContainerKind.StartsWith("production-", StringComparison.Ordinal))
+            {
+                return TryApplyReplicationProductionStorageContainer(state, out detail);
+            }
+
             detail = "unsupported-kind=" + state.ContainerKind;
             return false;
         }
@@ -542,14 +610,18 @@ namespace GoingCooperative.Plugin.BepInEx
             out string detail)
         {
             var ownerDetail = "owner-not-read";
-            if (!TryFindReplicationAnimatedAgentViewByEntityId(state.OwnerId, out var view, out var viewDetail)
-                || view == null
-                || !TryResolveReplicationAgentOwnerFromView(view, out var owner, out ownerDetail)
+            if (!TryFindReplicationAgentOwnerByEntityId(state.OwnerId, out var owner, out ownerDetail)
                 || owner == null)
             {
-                detail = "agent-unresolved " + viewDetail + " " + ownerDetail;
+                detail = "agent-owner-unresolved " + ownerDetail;
                 return false;
             }
+
+            // Owner data is authoritative; a view is only needed to refresh a
+            // visual.  Trader-party imports can receive container state in the
+            // narrow window before their manager view is attached.
+            var hasView = TryFindReplicationAnimatedAgentViewByEntityId(state.OwnerId, out var view, out var viewDetail)
+                && view != null;
 
             var memberName = string.Equals(state.ContainerKind, "agent-food", StringComparison.Ordinal)
                 ? "FoodStorage"
@@ -620,7 +692,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryResolveReplicationResourceModel(state.Entries[0].BlueprintId, out var resource, out _)
                         && resource != null)
                     {
-                        TryNotifyReplicationAgentStorageChanged(view, resource, state.Entries[0].Amount, out _);
+                        if (hasView)
+                            TryNotifyReplicationAgentStorageChanged(view!, resource, state.Entries[0].Amount, out _);
                     }
                 }
                 else
@@ -632,9 +705,13 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var refreshDetail = "refresh=unchanged";
-            if (changed > 0)
+            if (changed > 0 && hasView)
             {
-                TryInvokeReplicationObjectVoidMethod(view, "UpdateViewImmediate", out refreshDetail);
+                TryInvokeReplicationObjectVoidMethod(view!, "UpdateViewImmediate", out refreshDetail);
+            }
+            else if (changed > 0)
+            {
+                refreshDetail = "refresh=view-unavailable " + viewDetail;
             }
             detail = "ok kind="
                 + state.ContainerKind
@@ -645,8 +722,73 @@ namespace GoingCooperative.Plugin.BepInEx
                 + " "
                 + refreshDetail
                 + " "
+                + ownerDetail
+                + " "
                 + localDetail;
             return true;
+        }
+
+        private static bool TryApplyReplicationProductionStorageContainer(ReplicationResourceContainerState state, out string detail)
+        {
+            var systemDetail = "ticket-index-invalid";
+            if (!int.TryParse(state.OwnerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ticketIndex))
+            {
+                detail = "production-unresolved " + systemDetail;
+                return false;
+            }
+            if (!TryFindProductionSystemAtGrid(state.GridX, state.GridY, state.GridZ, out var system, out systemDetail)
+                || system == null
+                || !TryGetListMember(system, "productions", out var queue)
+                || ticketIndex < 0 || ticketIndex >= queue.Count
+                || queue[ticketIndex] == null)
+            {
+                detail = "production-unresolved " + systemDetail;
+                return false;
+            }
+
+            var ticket = queue[ticketIndex]!;
+            var memberName = string.Equals(state.ContainerKind, "production-secondary", StringComparison.Ordinal)
+                ? "SecondaryIngredientStorage"
+                : "Storage";
+            var localDetail = "storage-member-missing";
+            if (!TryReadInstanceMemberValue(ticket, memberName, out var storage) || storage == null
+                || !TryReadReplicationStorageEntries(storage, out var localEntries, out localDetail))
+            {
+                detail = "production-storage-unresolved member=" + memberName + " " + localDetail;
+                return false;
+            }
+
+            var desired = ToReplicationResourceAmountMap(state.Entries);
+            var local = ToReplicationResourceAmountMap(localEntries);
+            var changed = 0;
+            foreach (var pair in local)
+            {
+                desired.TryGetValue(pair.Key, out var desiredAmount);
+                if (pair.Value > desiredAmount && TryMutateReplicationStorage(storage, pair.Key, pair.Value - desiredAmount, false, out _)) changed++;
+            }
+            foreach (var pair in desired)
+            {
+                local.TryGetValue(pair.Key, out var localAmount);
+                if (pair.Value > localAmount && TryMutateReplicationStorage(storage, pair.Key, pair.Value - localAmount, true, out _)) changed++;
+            }
+
+            RefreshReplicationProductionTicketViews(system, ticket, state.GridX, state.GridY, state.GridZ, ticketIndex);
+            detail = "ok production-storage kind=" + state.ContainerKind + " changed=" + changed.ToString(CultureInfo.InvariantCulture)
+                + " entries=" + state.Entries.Count.ToString(CultureInfo.InvariantCulture) + " " + localDetail;
+            return true;
+        }
+
+        private static void RefreshReplicationProductionTicketViews(object system, object ticket, int x, int y, int z, int ticketIndex)
+        {
+            var viewType = HarmonyLib.AccessTools.TypeByName("NSMedieval.UI.ProductionLayoutItemView");
+            if (viewType == null) return;
+            var views = Resources.FindObjectsOfTypeAll(viewType);
+            for (var i = 0; i < views.Length; i++)
+            {
+                var view = views[i];
+                if (view == null || !TryReadInstanceMemberValue(view, "production", out var candidate) || !ReferenceEquals(candidate, ticket)) continue;
+                TryInvokeReplicationObjectVoidMethod(view, "UpdateProductionData", out _);
+            }
         }
 
         private static string FormatReplicationResourceContainerEntries(

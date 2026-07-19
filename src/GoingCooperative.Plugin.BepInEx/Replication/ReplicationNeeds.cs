@@ -16,6 +16,11 @@ namespace GoingCooperative.Plugin.BepInEx
             new Dictionary<string, long>(StringComparer.Ordinal);
         private static readonly Dictionary<string, bool> ReplicationNeedsLastSleepVisualByEntityId =
             new Dictionary<string, bool>(StringComparer.Ordinal);
+        // Sleep presentation is client-native in this build.  These keys are a
+        // session boundary only: they prevent the several native SleepGoal end
+        // callbacks from being replayed as separate wake transitions.
+        private static readonly Dictionary<string, bool> ReplicationNeedsHostSleepSessionByEntityId =
+            new Dictionary<string, bool>(StringComparer.Ordinal);
         private static readonly Dictionary<string, ReplicationPendingNeedsRepair> ReplicationPendingNeedsRepairs =
             new Dictionary<string, ReplicationPendingNeedsRepair>(StringComparer.Ordinal);
         private static Dictionary<string, object>? replicationNeedsViewCache;
@@ -133,6 +138,15 @@ namespace GoingCooperative.Plugin.BepInEx
                         : string.Equals(method, "ConsumeFoodAction", StringComparison.Ordinal)
                             ? "consuming"
                             : "started";
+            // LifeController.FallAsleep/WakeUp are the authoritative semantic
+            // boundaries.  Goal methods are advisory and fire repeatedly while
+            // the client is already rendering the native sleep state.
+            if (string.Equals(kind, "sleep", StringComparison.Ordinal)
+                || string.Equals(kind, "rest", StringComparison.Ordinal))
+            {
+                return;
+            }
+
             SendReplicationNeedsLifecycle(entityId, kind, phase, "source=" + typeName + "." + method);
         }
 
@@ -162,6 +176,13 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var sleeping = string.Equals(__originalMethod.Name, "FallAsleep", StringComparison.Ordinal);
+            if (ReplicationNeedsHostSleepSessionByEntityId.TryGetValue(entityId, out var wasSleeping)
+                && wasSleeping == sleeping)
+            {
+                return;
+            }
+
+            ReplicationNeedsHostSleepSessionByEntityId[entityId] = sleeping;
             SendReplicationNeedsLifecycle(entityId, "sleep", sleeping ? "sleeping" : "woke",
                 "source=LifeController." + __originalMethod.Name);
         }
@@ -472,12 +493,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 parts.Add(sleepDetail);
             }
 
-            if (!ReplicationNeedsLastSleepVisualByEntityId.TryGetValue(pending.EntityId, out var lastSleeping)
-                || lastSleeping != pending.IsSleeping)
-            {
-                parts.Add(ApplyReplicationNeedsSleepVisual(view, pending.IsSleeping));
-                ReplicationNeedsLastSleepVisualByEntityId[pending.EntityId] = pending.IsSleeping;
-            }
+            // Do not drive generic Animator booleans here.  Client-native sleep
+            // presentation already plays correctly, while forcing a guessed
+            // parameter on every stat repair causes visible wake/sleep fighting.
+            ReplicationNeedsLastSleepVisualByEntityId[pending.EntityId] = pending.IsSleeping;
 
             replicationNeedsRepairValuesApplied += applied;
             detail = "needs-repair-ok entityId=" + pending.EntityId
@@ -570,14 +589,17 @@ namespace GoingCooperative.Plugin.BepInEx
             }
             else if (string.Equals(kind, "sleep", StringComparison.Ordinal))
             {
-                if (string.Equals(phase, "sleeping", StringComparison.Ordinal)
-                    || string.Equals(phase, "woke", StringComparison.Ordinal)
-                    || string.Equals(phase, "ended", StringComparison.Ordinal))
-                {
-                    var sleeping = string.Equals(phase, "sleeping", StringComparison.Ordinal);
-                    visualDetail = ApplyReplicationNeedsSleepVisual(view, sleeping);
-                    ReplicationNeedsLastSleepVisualByEntityId[entityId] = sleeping;
-                }
+                // The host owns the session boundaries.  Replay the game's
+                // native visual callbacks at those boundaries rather than
+                // guessing at Animator state.  These callbacks only update
+                // the local presentation; they do not run client simulation.
+                var sleeping = string.Equals(phase, "sleeping", StringComparison.Ordinal);
+                ReplicationNeedsLastSleepVisualByEntityId[entityId] = sleeping;
+                visualDetail = string.Equals(phase, "sleeping", StringComparison.Ordinal)
+                    ? ApplyReplicationNeedsNativeSleepPresentation(view)
+                    : string.Equals(phase, "woke", StringComparison.Ordinal)
+                        ? ApplyReplicationNeedsNativeWakePresentation(view)
+                        : "sleep-session-recorded native-visual";
             }
 
             TryReadReplicationWorldObjectDetailBool(delta.Detail, "hasHunger", out var hasHunger);
@@ -588,11 +610,16 @@ namespace GoingCooperative.Plugin.BepInEx
             var sleepCurrent = TryReadReplicationWorldObjectDetailFloat(delta.Detail, "sleepCurrent", out var eventSleep)
                 ? eventSleep
                 : 0f;
-            if (hasHunger || hasSleep)
+            // During an active sleep session, writing Sleep.Current on the
+            // client can make its native goal reevaluate and stand the pawn up.
+            // Reconcile it once the host says the session woke instead.
+            var applySleepStat = !string.Equals(kind, "sleep", StringComparison.Ordinal)
+                || !string.Equals(phase, "sleeping", StringComparison.Ordinal);
+            if (hasHunger || (hasSleep && applySleepStat))
             {
                 var sleepingState = ReplicationNeedsLastSleepVisualByEntityId.TryGetValue(entityId, out var currentSleeping)
                     && currentSleeping;
-                TryApplyReplicationNeedsRepair(entityId, hasHunger, hungerCurrent, hasSleep, sleepCurrent, sleepingState, out _);
+                TryApplyReplicationNeedsRepair(entityId, hasHunger, hungerCurrent, hasSleep && applySleepStat, sleepCurrent, sleepingState, out _);
             }
 
             ReplicationNeedsLastAppliedDeltaByEntityAndKind[stateKey] = delta.Sequence;
@@ -618,6 +645,118 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             return "sleep-parameter-missing";
+        }
+
+        private static string ApplyReplicationNeedsNativeSleepTransition(object view, bool sleeping)
+        {
+            var action = sleeping ? "sleep" : "wake";
+            try
+            {
+                if (!TryResolveReplicationAgentOwnerFromView(view, out var owner, out var ownerDetail)
+                    || owner == null)
+                {
+                    return "sleep-" + action + "-owner-missing " + ownerDetail;
+                }
+
+                object? behaviourOwner = null;
+                TryResolveReplicationBehaviourOwner(owner, out behaviourOwner);
+                var statsOwner = TryResolveReplicationStatsOwner(owner, behaviourOwner);
+                var statsType = AccessTools.TypeByName("NSMedieval.StatsSystem.StatsInstance");
+                var lifeType = AccessTools.TypeByName("NSMedieval.Controllers.LifeController");
+                if (statsOwner == null || statsType == null || !statsType.IsInstanceOfType(statsOwner) || lifeType == null)
+                {
+                    return "sleep-" + action + "-surface-missing";
+                }
+
+                var controller = ResolveReplicationUnityManagerInstance(lifeType);
+                var method = FindReplicationInstanceMethod(lifeType, sleeping ? "FallAsleep" : "WakeUp", new[] { statsType });
+                if (controller == null || method == null)
+                {
+                    return "sleep-" + action + "-method-missing";
+                }
+
+                applyingRuntimeCommandDepth++;
+                try
+                {
+                    method.Invoke(controller, new[] { statsOwner });
+                    return "sleep-" + action + "-native";
+                }
+                finally
+                {
+                    applyingRuntimeCommandDepth--;
+                }
+            }
+            catch (Exception ex)
+            {
+                return "sleep-" + action + "-error " + FormatReflectionExceptionDetail(ex);
+            }
+        }
+
+        private static string ApplyReplicationNeedsNativeSleepPresentation(object view)
+        {
+            // LifeController.FallAsleep merely raises the WorkerManager event;
+            // the visual itself is the GOAP LayDown animation.  Replaying that
+            // controller trigger is presentation-only and avoids changing the
+            // client's sleep simulation/stat state.
+            var lifecycleDetail = ApplyReplicationNeedsNativeSleepTransition(view, true);
+            try
+            {
+                applyingRuntimeCommandDepth++;
+                try
+                {
+                    // Semantic replay deliberately prefers HumanoidView's
+                    // OnTriggerAnimation path. The generic helper prefers
+                    // AnimationController, which reports success but does not
+                    // drive this view's LayDown pose in a client replica.
+                    // LayDown is the action id; the actual animator trigger
+                    // supplied by LayDownBaseGoal is Sleep.
+                    var animationDetail = InvokeReplicationSemanticWorkAnimationTrigger(view, "Sleep", string.Empty);
+                    return lifecycleDetail + " " + animationDetail;
+                }
+                finally
+                {
+                    applyingRuntimeCommandDepth--;
+                }
+            }
+            catch (Exception ex)
+            {
+                return lifecycleDetail + " sleep-laydown-error " + FormatReflectionExceptionDetail(ex);
+            }
+        }
+
+        private static string ApplyReplicationNeedsNativeWakePresentation(object view)
+        {
+            var lifecycleDetail = ApplyReplicationNeedsNativeSleepTransition(view, false);
+            try
+            {
+                applyingRuntimeCommandDepth++;
+                try
+                {
+                    var method = FindReplicationInstanceMethod(view.GetType(), "ForceQuitAnimation", Type.EmptyTypes)
+                        ?? FindReplicationInstanceMethod(view.GetType(), "ResetTriggers", Type.EmptyTypes);
+                    if (method == null)
+                    {
+                        return lifecycleDetail + " sleep-wake-visual-method-missing";
+                    }
+
+                    method.Invoke(view, null);
+                    if (TryResolveReplicationAnimator(view, out var animator) && animator != null)
+                    {
+                        TrySetReplicationAnimatorBool(animator, "Sleep", false);
+                        TrySetReplicationAnimatorBool(animator, "Sleeping", false);
+                        TrySetReplicationAnimatorBool(animator, "IsSleeping", false);
+                    }
+                    return lifecycleDetail + " sleep-wake-visual=" + method.Name;
+                }
+                finally
+                {
+                    applyingRuntimeCommandDepth--;
+                }
+            }
+            catch (Exception ex)
+            {
+                return lifecycleDetail + " sleep-wake-visual-error " + FormatReflectionExceptionDetail(ex);
+            }
         }
 
         private static bool TryFindReplicationNeedsView(string entityId, out object? view, out string detail)
@@ -707,6 +846,7 @@ namespace GoingCooperative.Plugin.BepInEx
             ReplicationNeedsEventSequenceByEntityId.Clear();
             ReplicationNeedsLastAppliedDeltaByEntityAndKind.Clear();
             ReplicationNeedsLastSleepVisualByEntityId.Clear();
+            ReplicationNeedsHostSleepSessionByEntityId.Clear();
             ReplicationPendingNeedsRepairs.Clear();
             replicationNeedsViewCache = null;
             replicationNeedsViewCacheBuiltRealtime = 0f;

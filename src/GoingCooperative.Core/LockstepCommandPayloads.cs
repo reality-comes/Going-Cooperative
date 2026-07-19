@@ -44,6 +44,127 @@ namespace GoingCooperative.Core
         public const string CombatPresentationEndReasonStreamEnded = "stream-ended";
         public const string CombatPresentationEndReasonWatchdog = "watchdog";
         public const string GameEventOptionChosenAction = "GameEventOptionChosen";
+        public const string TraderTradeCommitAction = "TraderTradeCommit";
+        public const string TraderTradeBasketUpdateAction = "TraderTradeBasketUpdate";
+        public const string TraderTradeOpenRequestAction = "TraderTradeOpenRequest";
+
+        public static string CreateTraderTradeOpenRequestPayload(
+            long epoch,
+            string traderEntityId,
+            string workerEntityId,
+            string requestId)
+        {
+            return "{\"action\":\"" + TraderTradeOpenRequestAction
+                + "\",\"epoch\":" + epoch.ToString(CultureInfo.InvariantCulture)
+                + ",\"traderEntityId\":\"" + EscapeJsonString(traderEntityId)
+                + "\",\"workerEntityId\":\"" + EscapeJsonString(workerEntityId)
+                + "\",\"requestId\":\"" + EscapeJsonString(requestId)
+                + "\"}";
+        }
+
+        public static bool TryReadTraderTradeOpenRequestPayload(
+            string payloadJson,
+            out long epoch,
+            out string traderEntityId,
+            out string workerEntityId,
+            out string requestId)
+        {
+            var normalized = Normalize(payloadJson);
+            epoch = -1L;
+            traderEntityId = string.Empty;
+            workerEntityId = string.Empty;
+            requestId = string.Empty;
+            return HasAction(normalized, TraderTradeOpenRequestAction)
+                && TryReadLongProperty(normalized, "epoch", out epoch)
+                && epoch >= 0L
+                && TryReadStringProperty(normalized, "traderEntityId", out traderEntityId)
+                && !string.IsNullOrWhiteSpace(traderEntityId)
+                && traderEntityId.Length <= 256
+                && TryReadStringProperty(normalized, "workerEntityId", out workerEntityId)
+                && !string.IsNullOrWhiteSpace(workerEntityId)
+                && workerEntityId.Length <= 256
+                && TryReadStringProperty(normalized, "requestId", out requestId)
+                && !string.IsNullOrWhiteSpace(requestId)
+                && requestId.Length <= 128;
+        }
+
+        public static string CreateTraderTradeBasketUpdatePayload(
+            string sessionId,
+            long revision,
+            string requestId,
+            string basket)
+        {
+            return "{\"action\":\"" + TraderTradeBasketUpdateAction
+                + "\",\"sessionId\":\"" + EscapeJsonString(sessionId)
+                + "\",\"revision\":" + revision.ToString(CultureInfo.InvariantCulture)
+                + ",\"requestId\":\"" + EscapeJsonString(requestId)
+                + "\",\"basket\":\"" + EscapeJsonString(basket)
+                + "\"}";
+        }
+
+        public static bool TryReadTraderTradeBasketUpdatePayload(
+            string payloadJson,
+            out string sessionId,
+            out long revision,
+            out string requestId,
+            out string basket)
+        {
+            var normalized = Normalize(payloadJson);
+            sessionId = string.Empty;
+            revision = -1L;
+            requestId = string.Empty;
+            basket = string.Empty;
+            return HasAction(normalized, TraderTradeBasketUpdateAction)
+                && TryReadStringProperty(normalized, "sessionId", out sessionId)
+                && !string.IsNullOrWhiteSpace(sessionId)
+                && sessionId.Length <= 128
+                && TryReadLongProperty(normalized, "revision", out revision)
+                && revision > 0L
+                && TryReadStringProperty(normalized, "requestId", out requestId)
+                && !string.IsNullOrWhiteSpace(requestId)
+                && requestId.Length <= 128
+                && TryReadStringProperty(normalized, "basket", out basket)
+                && basket.Length <= 16384;
+        }
+
+        public static string CreateTraderTradeCommitPayload(
+            string sessionId,
+            long revision,
+            string requestId,
+            string basket)
+        {
+            return "{\"action\":\"" + TraderTradeCommitAction
+                + "\",\"sessionId\":\"" + EscapeJsonString(sessionId)
+                + "\",\"revision\":" + revision.ToString(CultureInfo.InvariantCulture)
+                + ",\"requestId\":\"" + EscapeJsonString(requestId)
+                + "\",\"basket\":\"" + EscapeJsonString(basket)
+                + "\"}";
+        }
+
+        public static bool TryReadTraderTradeCommitPayload(
+            string payloadJson,
+            out string sessionId,
+            out long revision,
+            out string requestId,
+            out string basket)
+        {
+            var normalized = Normalize(payloadJson);
+            sessionId = string.Empty;
+            revision = -1L;
+            requestId = string.Empty;
+            basket = string.Empty;
+            return HasAction(normalized, TraderTradeCommitAction)
+                && TryReadStringProperty(normalized, "sessionId", out sessionId)
+                && !string.IsNullOrWhiteSpace(sessionId)
+                && sessionId.Length <= 128
+                && TryReadLongProperty(normalized, "revision", out revision)
+                && revision > 0L
+                && TryReadStringProperty(normalized, "requestId", out requestId)
+                && !string.IsNullOrWhiteSpace(requestId)
+                && requestId.Length <= 128
+                && TryReadStringProperty(normalized, "basket", out basket)
+                && basket.Length <= 16384;
+        }
 
         public static string CreateGameEventOptionChosenPayload(
             long epoch,
