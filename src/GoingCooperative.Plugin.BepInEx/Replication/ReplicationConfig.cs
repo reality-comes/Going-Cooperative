@@ -61,6 +61,14 @@ namespace GoingCooperative.Plugin.BepInEx
         // Transactional placement plus sparse lifecycle replication. False restores
         // the legacy periodic full-building snapshot lane for rollback testing.
         private static bool replicationConfigBuildingReplicationV2 = true;
+        // Exact native semantic placement lanes. Each remains independently
+        // reversible; disabled categories continue through the fail-closed rollback.
+        private static bool replicationConfigBeamPlacementReplication;
+        private static bool replicationConfigBeamLifecycleReplication;
+        private static bool replicationConfigSocketablePlacementReplication;
+        // Focused beam capture/replay tracing. This is intentionally independent
+        // from the high-volume world-delta and transport diagnostic gates.
+        private static bool replicationConfigBeamReplicationDiagnostics;
         private static bool replicationConfigValidateSnapshots = true;
         private static bool replicationConfigSendProofIntent;
         private static bool replicationConfigResultLifecycleProbes = true;
@@ -266,6 +274,14 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigVerboseReplicationLogging
                     + " buildingReplicationV2="
                     + replicationConfigBuildingReplicationV2
+                    + " beamPlacementReplication="
+                    + replicationConfigBeamPlacementReplication
+                    + " beamLifecycleReplication="
+                    + replicationConfigBeamLifecycleReplication
+                    + " socketablePlacementReplication="
+                    + replicationConfigSocketablePlacementReplication
+                    + " beamReplicationDiagnostics="
+                    + replicationConfigBeamReplicationDiagnostics
                     + " resourcePileStateSnapshots="
                     + replicationConfigResourcePileStateSnapshots
                     + " resourceContainerReplication="
@@ -336,6 +352,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigWorldObjectDeltaApplyBudgetMsPerFrame.ToString("0.###", CultureInfo.InvariantCulture)
                     + " maxSnapshotEntities="
                     + replicationConfigMaxSnapshotEntities.ToString(CultureInfo.InvariantCulture));
+                LogReplicationInventoryAuthority(current);
 
                 current.Logger.LogInfo("Going Cooperative replication config ui="
                     + (replicationConfigUiV2 ? "v2" : "classic")
@@ -416,6 +433,30 @@ namespace GoingCooperative.Plugin.BepInEx
                     + ":"
                     + ex.Message);
                 replicationConfigEnabled = false;
+            }
+        }
+
+        private static void LogReplicationInventoryAuthority(GoingCooperativePlugin current)
+        {
+            var carrySnapshotAvailable = !string.Equals(
+                replicationConfigWorldObjectDeltaMode,
+                "off",
+                StringComparison.OrdinalIgnoreCase);
+            var agentInventoryOwner = replicationConfigResourceContainerReplication
+                ? "resource-containers"
+                : carrySnapshotAvailable ? "carry-snapshot" : "none";
+            var productionContainerOwner = replicationConfigResourceContainerReplication
+                ? (replicationConfigProductionStateV2 ? "production-v2" : "legacy-resource-containers")
+                : "none";
+            current.Logger.LogInfo("Going Cooperative replication authority agent-inventory="
+                + agentInventoryOwner
+                + " production-containers="
+                + productionContainerOwner);
+
+            if (string.Equals(agentInventoryOwner, "none", StringComparison.Ordinal))
+            {
+                current.Logger.LogWarning(
+                    "Going Cooperative replication authority invalid agent-inventory=none; pawn inventory will not converge.");
             }
         }
 
@@ -995,6 +1036,51 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryParseConfigBool(value, out var buildingReplicationV2))
                     {
                         replicationConfigBuildingReplicationV2 = buildingReplicationV2;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "beamplacementreplication":
+                    if (TryParseConfigBool(value, out var beamPlacementReplication))
+                    {
+                        replicationConfigBeamPlacementReplication = beamPlacementReplication;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "beamlifecyclereplication":
+                    if (TryParseConfigBool(value, out var beamLifecycleReplication))
+                    {
+                        replicationConfigBeamLifecycleReplication = beamLifecycleReplication;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "socketableplacementreplication":
+                    if (TryParseConfigBool(value, out var socketablePlacementReplication))
+                    {
+                        replicationConfigSocketablePlacementReplication = socketablePlacementReplication;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "beamreplicationdiagnostics":
+                case "beamdiagnostics":
+                    if (TryParseConfigBool(value, out var beamReplicationDiagnostics))
+                    {
+                        replicationConfigBeamReplicationDiagnostics = beamReplicationDiagnostics;
                     }
                     else
                     {

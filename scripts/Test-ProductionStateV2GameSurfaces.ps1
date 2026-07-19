@@ -12,8 +12,9 @@ $managementPath = Join-Path $repositoryRoot "src\GoingCooperative.Plugin.BepInEx
 $containersPath = Join-Path $repositoryRoot "src\GoingCooperative.Plugin.BepInEx\Replication\ReplicationResourceContainers.cs"
 $workstationPath = Join-Path $repositoryRoot "src\GoingCooperative.Plugin.BepInEx\Replication\ReplicationWorkstationRuntimePresentation.cs"
 $configPath = Join-Path $repositoryRoot "config\replication.cfg"
+$configSourcePath = Join-Path $repositoryRoot "src\GoingCooperative.Plugin.BepInEx\Replication\ReplicationConfig.cs"
 
-foreach ($path in @($cecilPath, $gameAssemblyPath, $productionPath, $runtimePath, $managementPath, $containersPath, $workstationPath, $configPath)) {
+foreach ($path in @($cecilPath, $gameAssemblyPath, $productionPath, $runtimePath, $managementPath, $containersPath, $workstationPath, $configPath, $configSourcePath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Production-v2 contract input missing: $path" }
 }
 
@@ -23,6 +24,7 @@ $management = Get-Content -LiteralPath $managementPath -Raw
 $containers = Get-Content -LiteralPath $containersPath -Raw
 $workstation = Get-Content -LiteralPath $workstationPath -Raw
 $config = Get-Content -LiteralPath $configPath -Raw
+$configSource = Get-Content -LiteralPath $configSourcePath -Raw
 
 foreach ($marker in @(
     'replicationConfigProductionStateV2',
@@ -59,11 +61,16 @@ if ($production -notmatch 'record\.QueueIndex < 0') {
     throw "Production-v2 does not suppress removed production tickets."
 }
 
-$runtimeBranch = [regex]::Match($runtime, 'if \(!replicationConfigProductionStateV2\)[\s\S]*?UpdateReplicationProductionStateV2\(\);')
-if (-not $runtimeBranch.Success -or
-    $runtimeBranch.Value -notmatch 'SendHostReplicationResourceContainersIfDue' -or
-    $runtimeBranch.Value -notmatch 'UpdateReplicationWorkstationRuntimePresentation') {
-    throw "Production-v2 runtime does not retain gated legacy fallback."
+$runtimeBranch = [regex]::Match($runtime, 'SendHostReplicationResourceContainersIfDue\(\);[\s\S]*?if \(!replicationConfigProductionStateV2\)[\s\S]*?UpdateReplicationWorkstationRuntimePresentation\(\);')
+if (-not $runtimeBranch.Success) {
+    throw "Production-v2 runtime does not keep agent inventory sending while gating only legacy workstation presentation."
+}
+if ($containers -notmatch 'CollectReplicationAgentStorageContainer[\s\S]*?if \(!replicationConfigProductionStateV2\)[\s\S]*?CollectReplicationProductionStorageContainers') {
+    throw "Production-v2 container routing does not preserve agent inventories while excluding legacy production containers."
+}
+if ($configSource -notmatch 'agent-inventory="[\s\S]*?production-containers="' -or
+    $configSource -notmatch 'agent-inventory=none') {
+    throw "Replication startup does not declare resolved inventory ownership or warn on an orphaned lane."
 }
 if ($workstation -notmatch 'TryResolveOrBindReplicationProductionTicketV2' -or
     $workstation -notmatch 'TryFindReplicationProductionComponentV2AtGrid') {
@@ -83,7 +90,7 @@ if ($production -notmatch 'TryApplyReplicationProductionRuntimeStateV2' -or
     throw "Production-v2 does not project and protect authoritative ticket state."
 }
 foreach ($gate in @('productionStateV2', 'productionTicketOrdersV2', 'workstationRuntimePresentation', 'resourceContainerReplication')) {
-    if ($config -notmatch "(?m)^$gate=true$") { throw "Production-v2 tested package gate must be enabled: $gate" }
+    if ($config -notmatch "(?m)^$gate=true\r?$") { throw "Production-v2 tested package gate must be enabled: $gate" }
 }
 
 [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($cecilPath))

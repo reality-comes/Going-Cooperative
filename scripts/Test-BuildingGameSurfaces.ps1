@@ -134,6 +134,11 @@ $onLeftCalls = @($onLeftMouseUp.Body.Instructions | ForEach-Object { if ($null -
 foreach ($branch in @("MouseUpSpawnInitializeBuildings", "MouseUpRoofs", "MouseUpSocketable")) {
     if (-not $onLeftCalls.Contains($branch)) { throw "OnLeftMouseUp no longer reaches required placement branch: $branch" }
 }
+$spawnBeamX = $placement.Methods | Where-Object { $_.Name -eq "SpawnBeamAxisX" -and $_.Parameters.Count -eq 4 } | Select-Object -First 1
+$spawnBeamZ = $placement.Methods | Where-Object { $_.Name -eq "SpawnBeamAxisZ" -and $_.Parameters.Count -eq 4 } | Select-Object -First 1
+$tryPlaceSocketable = $placement.Methods | Where-Object { $_.Name -eq "TryPlaceSocketable" -and $_.Parameters.Count -eq 4 } | Select-Object -First 1
+if ($null -eq $spawnBeamX -or $null -eq $spawnBeamZ) { throw "Exact native beam semantic replay surfaces are missing." }
+if ($null -eq $tryPlaceSocketable) { throw "Exact native socketable semantic replay surface is missing." }
 
 $captureSource = Get-Content -LiteralPath $capturePath -Raw
 $commandCaptureSource = Get-Content -LiteralPath $commandCapturePath -Raw
@@ -155,7 +160,13 @@ if (-not $captureSource.Contains('ReplicationBuildObjectPlacedOnMapPrefix') -or 
 if (-not $captureSource.Contains('committed-build-unique-id-invalid')) { throw "A committed building without a positive authoritative identity can enter a batch manifest." }
 if (-not $captureSource.Contains('reason=build-transport-not-ready') -or -not $captureSource.Contains('ShowReplicationBuildTransportNotReadyMessage()')) { throw "A send-enabled client can retain local-only placement while the multiplayer command channel is not ready." }
 if (-not $captureSource.Contains('placement failed and was rolled back to keep both players synchronized')) { throw "Fail-closed native placement rollback is not visible to the player." }
-if (-not $batchSource.Contains("build-batch-unsupported-semantic-category")) { throw "Beam/socket blueprints must be rejected instead of flattened into normal placement." }
+if (-not $batchSource.Contains("build-batch-unsupported-semantic-category")) { throw "Unclassified beam/socket blueprints must still fail closed." }
+if (-not $batchSource.Contains('ReplicationBuildPlacementKind.BeamX') -or -not $batchSource.Contains('ReplicationBuildPlacementKind.BeamZ') -or -not $batchSource.Contains('ReplicationBuildPlacementKind.Socketable')) { throw "BuildBatch is missing tagged beam/socketable geometry." }
+if (-not $batchSource.Contains('SpawnBeamAxisX') -or -not $batchSource.Contains('SpawnBeamAxisZ') -or -not $batchSource.Contains('TryPlaceSocketable')) { throw "Tagged beam/socketable records are not replayed through native semantic calls." }
+if (-not $batchSource.Contains('BEAM_REPLICATION_DIAGNOSTIC') -or -not $batchSource.Contains('preinvoke-endpoint') -or -not $batchSource.Contains('native-null')) { throw "Gated beam replay diagnostics no longer distinguish endpoint resolution from native rejection." }
+if (-not $batchSource.Contains('ResolveReplicationBuildingsManagerMain(managerType, out managerDetail)')) { throw "Beam endpoint replay bypasses the active-village-aware BuildingsManagerMain resolver." }
+if (-not $captureSource.Contains('Enum.GetName(value.GetType(), value)')) { throw "Beam/socket fail-closed classification regressed to unstable numeric enum values." }
+if (-not $captureSource.Contains('StartSocketGridPosition') -or -not $captureSource.Contains('EndSocketGridPosition') -or -not $captureSource.Contains('beam-topology-native')) { throw "Beam capture is not sourced from committed native socket-grid endpoints." }
 if (-not $worldDeltaSource.Contains("same-grid mismatch is not a negative result")) { throw "Layered same-grid lookup regression guard is missing." }
 if (-not $worldDeltaSource.Contains("ReplicationBuildingBlueprintBatchPlacedDeltaKind")) { throw "Host-origin drag placements are not sent as one batch." }
 if (-not $worldDeltaSource.Contains("ReplicationBuildingBlueprintBatchResultDeltaKind")) { throw "Client-origin drag results are not reconciled as one batch." }

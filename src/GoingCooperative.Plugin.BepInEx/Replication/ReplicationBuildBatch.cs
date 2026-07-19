@@ -146,6 +146,43 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static string FormatReplicationBuildPlacementRecord(ReplicationBuildPlacementRecord record)
         {
+            if (record.Kind == ReplicationBuildPlacementKind.BeamX
+                || record.Kind == ReplicationBuildPlacementKind.BeamZ)
+            {
+                return string.Join(",", new[]
+                {
+                    record.Kind == ReplicationBuildPlacementKind.BeamX ? "BX" : "BZ",
+                    record.X.ToString(CultureInfo.InvariantCulture),
+                    record.Y.ToString(CultureInfo.InvariantCulture),
+                    record.Z.ToString(CultureInfo.InvariantCulture),
+                    record.AngleY.ToString(CultureInfo.InvariantCulture),
+                    record.Start.X.ToString(CultureInfo.InvariantCulture),
+                    record.Start.Y.ToString(CultureInfo.InvariantCulture),
+                    record.Start.Z.ToString(CultureInfo.InvariantCulture),
+                    record.StartIsBuilding ? "1" : "0",
+                    record.End.X.ToString(CultureInfo.InvariantCulture),
+                    record.End.Y.ToString(CultureInfo.InvariantCulture),
+                    record.End.Z.ToString(CultureInfo.InvariantCulture),
+                    record.EndIsBuilding ? "1" : "0"
+                });
+            }
+
+            if (record.Kind == ReplicationBuildPlacementKind.Socketable)
+            {
+                return string.Join(",", new[]
+                {
+                    "S",
+                    record.X.ToString(CultureInfo.InvariantCulture),
+                    record.Y.ToString(CultureInfo.InvariantCulture),
+                    record.Z.ToString(CultureInfo.InvariantCulture),
+                    record.AngleY.ToString(CultureInfo.InvariantCulture),
+                    record.Start.X.ToString(CultureInfo.InvariantCulture),
+                    record.Start.Y.ToString(CultureInfo.InvariantCulture),
+                    record.Start.Z.ToString(CultureInfo.InvariantCulture),
+                    record.SocketSide.ToString(CultureInfo.InvariantCulture)
+                });
+            }
+
             var value = new StringBuilder(record.IsRoof ? 128 : 48);
             value.Append(record.IsRoof ? 'R' : 'N');
             value.Append(',').Append(record.X.ToString(CultureInfo.InvariantCulture));
@@ -231,8 +268,12 @@ namespace GoingCooperative.Plugin.BepInEx
 
             var segments = value.Split(new[] { ';' }, StringSplitOptions.None);
             var header = segments[0].Split(new[] { ',' }, StringSplitOptions.None);
+            var isBeamX = header.Length == 13 && string.Equals(header[0], "BX", StringComparison.Ordinal);
+            var isBeamZ = header.Length == 13 && string.Equals(header[0], "BZ", StringComparison.Ordinal);
+            var isSocketable = header.Length == 9 && string.Equals(header[0], "S", StringComparison.Ordinal);
             var isRoof = header.Length == 8 && string.Equals(header[0], "R", StringComparison.Ordinal);
-            if ((!isRoof && (header.Length != 5 || !string.Equals(header[0], "N", StringComparison.Ordinal)))
+            if ((!isRoof && !isBeamX && !isBeamZ && !isSocketable
+                    && (header.Length != 5 || !string.Equals(header[0], "N", StringComparison.Ordinal)))
                 || !TryParseReplicationBuildRecordInt(header[1], out var x)
                 || !TryParseReplicationBuildRecordInt(header[2], out var y)
                 || !TryParseReplicationBuildRecordInt(header[3], out var z)
@@ -240,6 +281,50 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 detail = "build-record-header-invalid";
                 return false;
+            }
+
+            if (isBeamX || isBeamZ)
+            {
+                if (!TryParseReplicationBuildRecordInt(header[5], out var startX)
+                    || !TryParseReplicationBuildRecordInt(header[6], out var startY)
+                    || !TryParseReplicationBuildRecordInt(header[7], out var startZ)
+                    || (header[8] != "0" && header[8] != "1")
+                    || !TryParseReplicationBuildRecordInt(header[9], out var endX)
+                    || !TryParseReplicationBuildRecordInt(header[10], out var endY)
+                    || !TryParseReplicationBuildRecordInt(header[11], out var endZ)
+                    || (header[12] != "0" && header[12] != "1")
+                    || segments.Length != 1)
+                {
+                    detail = "build-record-beam-topology-invalid";
+                    return false;
+                }
+
+                record = ReplicationBuildPlacementRecord.CreateBeam(
+                    isBeamX ? ReplicationBuildPlacementKind.BeamX : ReplicationBuildPlacementKind.BeamZ,
+                    x, y, z, NormalizeReplicationBuildAngle(angleY),
+                    new ReplicationBuildGridPosition(startX, startY, startZ), header[8] == "1",
+                    new ReplicationBuildGridPosition(endX, endY, endZ), header[12] == "1");
+                detail = "ok";
+                return true;
+            }
+
+            if (isSocketable)
+            {
+                if (!TryParseReplicationBuildRecordInt(header[5], out var ownerX)
+                    || !TryParseReplicationBuildRecordInt(header[6], out var ownerY)
+                    || !TryParseReplicationBuildRecordInt(header[7], out var ownerZ)
+                    || !TryParseReplicationBuildRecordInt(header[8], out var socketSide)
+                    || segments.Length != 1)
+                {
+                    detail = "build-record-socket-topology-invalid";
+                    return false;
+                }
+
+                record = ReplicationBuildPlacementRecord.CreateSocketable(
+                    x, y, z, NormalizeReplicationBuildAngle(angleY),
+                    new ReplicationBuildGridPosition(ownerX, ownerY, ownerZ), socketSide);
+                detail = "ok";
+                return true;
             }
 
             var scaleX = 1;
@@ -327,7 +412,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     return false;
                 }
 
-                var key = record.IsRoof.ToString()
+                var key = record.Kind.ToString()
                     + "|"
                     + record.X.ToString(CultureInfo.InvariantCulture)
                     + ","
@@ -389,11 +474,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 var blueprintType = AccessTools.TypeByName("NSMedieval.BuildingComponents.BaseBuildingBlueprint");
                 var factionOwnershipType = AccessTools.TypeByName("NSMedieval.Village.FactionOwnership");
                 var vec3IntType = AccessTools.TypeByName("NSMedieval.Vec3Int");
+                var baseBuildingInstanceType = AccessTools.TypeByName("NSMedieval.BuildingComponents.BaseBuildingInstance");
                 if (placementManagerType == null
                     || buildingsPoolType == null
                     || blueprintType == null
                     || factionOwnershipType == null
-                    || vec3IntType == null)
+                    || vec3IntType == null
+                    || baseBuildingInstanceType == null)
                 {
                     detail = "build-batch-required-type-missing";
                     return false;
@@ -427,6 +514,21 @@ namespace GoingCooperative.Plugin.BepInEx
                         vec3IntType,
                         typeof(List<>).MakeGenericType(vec3IntType)
                     });
+                var spawnBeamAxisX = AccessTools.Method(
+                    placementManagerType,
+                    "SpawnBeamAxisX",
+                    new[] { blueprintType, typeof(object), typeof(object), baseBuildingInstanceType });
+                var spawnBeamAxisZ = AccessTools.Method(
+                    placementManagerType,
+                    "SpawnBeamAxisZ",
+                    new[] { blueprintType, typeof(object), typeof(object), baseBuildingInstanceType });
+                var objectSideType = AccessTools.TypeByName("NSMedieval.ObjectSide");
+                var tryPlaceSocketable = objectSideType == null
+                    ? null
+                    : AccessTools.Method(
+                        placementManagerType,
+                        "TryPlaceSocketable",
+                        new[] { vec3IntType, vec3IntType, objectSideType, typeof(int) });
                 if (getBuildableBase == null || spawnFromPool == null || mouseUpSpawn == null || spawnRoofAutoTesting == null)
                 {
                     detail = "build-batch-required-method-missing get="
@@ -447,7 +549,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     return false;
                 }
 
-                if (IsUnsupportedReplicationBuildBlueprint(blueprint, out var unsupportedCategory))
+                if (IsUnsupportedReplicationBuildBlueprint(blueprint, out var unsupportedCategory)
+                    && !records.TrueForAll(record => IsSupportedReplicationSemanticRecord(record, unsupportedCategory)))
                 {
                     detail = "build-batch-unsupported-semantic-category=" + unsupportedCategory;
                     return false;
@@ -504,13 +607,16 @@ namespace GoingCooperative.Plugin.BepInEx
                     }
                     var placed = 0;
                     var rejected = 0;
+                    var beamDiagnostics = replicationConfigBeamReplicationDiagnostics
+                        ? new List<string>()
+                        : null;
 
                     var normalGroups = new Dictionary<int, List<int>>();
                     var normalGroupOrder = new List<int>();
                     for (var i = 0; i < records.Count; i++)
                     {
                         var record = records[i];
-                        if (record.IsRoof)
+                        if (record.Kind != ReplicationBuildPlacementKind.Normal)
                         {
                             continue;
                         }
@@ -573,7 +679,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     for (var i = 0; i < records.Count; i++)
                     {
                         var record = records[i];
-                        if (!record.IsRoof)
+                        if (record.Kind != ReplicationBuildPlacementKind.Roof)
                         {
                             continue;
                         }
@@ -615,6 +721,113 @@ namespace GoingCooperative.Plugin.BepInEx
                         }
 
                         placed++;
+                    }
+
+                    for (var i = 0; i < records.Count; i++)
+                    {
+                        var record = records[i];
+                        if (record.Kind == ReplicationBuildPlacementKind.BeamX
+                            || record.Kind == ReplicationBuildPlacementKind.BeamZ)
+                        {
+                            var beamMethod = record.Kind == ReplicationBuildPlacementKind.BeamX
+                                ? spawnBeamAxisX
+                                : spawnBeamAxisZ;
+                            if (!replicationConfigBeamPlacementReplication || beamMethod == null)
+                            {
+                                rejected++;
+                                RecordReplicationBeamDiagnostic(
+                                    beamDiagnostics,
+                                    record,
+                                    "preinvoke-gate-or-method gate=" + replicationConfigBeamPlacementReplication
+                                        + " method=" + (beamMethod == null ? "missing" : beamMethod.Name));
+                                continue;
+                            }
+
+                            var startResolved = TryResolveReplicationBeamEndpoint(
+                                record.Start, record.StartIsBuilding, vec3IntType,
+                                out var startEndpoint, out var startDetail);
+                            var endResolved = TryResolveReplicationBeamEndpoint(
+                                record.End, record.EndIsBuilding, vec3IntType,
+                                out var endEndpoint, out var endDetail);
+                            var start = startResolved
+                                ? startEndpoint
+                                : null;
+                            var end = endResolved
+                                ? endEndpoint
+                                : null;
+                            if (start == null || end == null)
+                            {
+                                rejected++;
+                                RecordReplicationBeamDiagnostic(
+                                    beamDiagnostics,
+                                    record,
+                                    "preinvoke-endpoint start=" + startDetail + " end=" + endDetail);
+                                continue;
+                            }
+
+                            state.Set("baseBuildingBlueprint", blueprint);
+                            state.Set("raycastGridStart", CreateReplicationBuildVec3Int(vec3IntType, record));
+                            resultCapture.SetCurrentSemanticItemIndex(i);
+                            try
+                            {
+                                if (beamMethod.Invoke(placementManager, new[] { blueprint, start, end, null }) == null)
+                                {
+                                    rejected++;
+                                    RecordReplicationBeamDiagnostic(
+                                        beamDiagnostics,
+                                        record,
+                                        "native-null method=" + beamMethod.Name
+                                            + " start=" + startDetail + " end=" + endDetail
+                                            + " " + FormatReplicationBeamSpanDiagnostic(record));
+                                    continue;
+                                }
+                            }
+                            finally
+                            {
+                                resultCapture.ClearCurrentSemanticItemIndex();
+                            }
+
+                            placed++;
+                            RecordReplicationBeamDiagnostic(
+                                beamDiagnostics,
+                                record,
+                                "native-placed method=" + beamMethod.Name
+                                    + " start=" + startDetail + " end=" + endDetail);
+                        }
+                        else if (record.Kind == ReplicationBuildPlacementKind.Socketable)
+                        {
+                            if (!replicationConfigSocketablePlacementReplication
+                                || tryPlaceSocketable == null
+                                || objectSideType == null)
+                            {
+                                rejected++;
+                                continue;
+                            }
+
+                            state.Set("baseBuildingBlueprint", blueprint);
+                            state.Set("previewAngle", record.AngleY);
+                            state.Set("validSockets", Enum.ToObject(objectSideType, record.SocketSide));
+                            resultCapture.SetCurrentSemanticItemIndex(i);
+                            try
+                            {
+                                tryPlaceSocketable.Invoke(
+                                    placementManager,
+                                    new[]
+                                    {
+                                        CreateReplicationBuildVec3Int(vec3IntType, record),
+                                        CreateReplicationBuildVec3Int(
+                                            vec3IntType, record.Start.X, record.Start.Y, record.Start.Z),
+                                        Enum.ToObject(objectSideType, record.SocketSide),
+                                        (object)record.AngleY
+                                    });
+                            }
+                            finally
+                            {
+                                resultCapture.ClearCurrentSemanticItemIndex();
+                            }
+
+                            placed++;
+                        }
                     }
 
                     resultCapture.TrackUncommittedViews(buildingsDictionary);
@@ -661,7 +874,17 @@ namespace GoingCooperative.Plugin.BepInEx
                             ? " fullResyncRequired=yes"
                             : string.Empty)
                         + " blueprintId="
-                        + blueprintId;
+                        + blueprintId
+                        + (beamDiagnostics != null && beamDiagnostics.Count > 0
+                            ? " beamDiagnostic="
+                                + FormatReplicationWorldObjectDetailToken(string.Join("|", beamDiagnostics.ToArray()))
+                            : string.Empty);
+                    if (beamDiagnostics != null && beamDiagnostics.Count > 0)
+                    {
+                        instance?.LogReplicationWarning(
+                            "Going Cooperative BEAM_REPLICATION_DIAGNOSTIC "
+                            + string.Join(" | ", beamDiagnostics.ToArray()));
+                    }
                     return fullyCommitted;
                 }
             }
@@ -738,6 +961,98 @@ namespace GoingCooperative.Plugin.BepInEx
         {
             return Activator.CreateInstance(vec3IntType, new object[] { x, y, z })
                 ?? throw new InvalidOperationException("Vec3Int construction returned null.");
+        }
+
+        private static bool TryResolveReplicationBeamEndpoint(
+            ReplicationBuildGridPosition position,
+            bool isBuilding,
+            Type vec3IntType,
+            out object? endpoint,
+            out string detail)
+        {
+            endpoint = CreateReplicationBuildVec3Int(vec3IntType, position.X, position.Y, position.Z);
+            if (!isBuilding)
+            {
+                detail = "free@" + FormatReplicationBuildGridPosition(position);
+                return true;
+            }
+
+            var managerType = AccessTools.TypeByName("NSMedieval.BuildingComponents.BuildingsManagerMain");
+            var managerDetail = "manager-type-missing";
+            var manager = managerType == null
+                ? null
+                : ResolveReplicationBuildingsManagerMain(managerType, out managerDetail);
+            var tryGetWall = managerType == null
+                ? null
+                : AccessTools.Method(managerType, "TryGetWallForBeam", new[] { vec3IntType });
+            if (manager == null || tryGetWall == null)
+            {
+                endpoint = null;
+                detail = "building@" + FormatReplicationBuildGridPosition(position)
+                    + ":resolver-missing manager=" + (manager != null)
+                    + " method=" + (tryGetWall != null)
+                    + " source=" + FormatReplicationWorldObjectDetailToken(managerDetail);
+                return false;
+            }
+
+            endpoint = tryGetWall.Invoke(manager, new[] { endpoint });
+            if (endpoint == null)
+            {
+                detail = "building@" + FormatReplicationBuildGridPosition(position) + ":not-found";
+                return false;
+            }
+
+            var blueprint = TryResolveReplicationBuildingCandidateBlueprintId(endpoint, out var blueprintId)
+                ? blueprintId
+                : "unknown";
+            detail = "building@" + FormatReplicationBuildGridPosition(position)
+                + ":resolved=" + FormatShortTypeName(endpoint.GetType())
+                + ":blueprint=" + blueprint
+                + ":source=" + FormatReplicationWorldObjectDetailToken(managerDetail);
+            return true;
+        }
+
+        private static void RecordReplicationBeamDiagnostic(
+            List<string>? diagnostics,
+            ReplicationBuildPlacementRecord record,
+            string outcome)
+        {
+            if (diagnostics == null)
+            {
+                return;
+            }
+
+            diagnostics.Add("axis="
+                + (record.Kind == ReplicationBuildPlacementKind.BeamX ? "X" : "Z")
+                + " origin=" + record.X.ToString(CultureInfo.InvariantCulture)
+                + "," + record.Y.ToString(CultureInfo.InvariantCulture)
+                + "," + record.Z.ToString(CultureInfo.InvariantCulture)
+                + " start=" + FormatReplicationBuildGridPosition(record.Start)
+                + (record.StartIsBuilding ? ":building" : ":free")
+                + " end=" + FormatReplicationBuildGridPosition(record.End)
+                + (record.EndIsBuilding ? ":building" : ":free")
+                + " outcome=" + outcome);
+        }
+
+        private static string FormatReplicationBeamSpanDiagnostic(ReplicationBuildPlacementRecord record)
+        {
+            var deltaX = Math.Abs(record.End.X - record.Start.X);
+            var deltaY = Math.Abs(record.End.Y - record.Start.Y);
+            var deltaZ = Math.Abs(record.End.Z - record.Start.Z);
+            return "span=" + deltaX.ToString(CultureInfo.InvariantCulture)
+                + "," + deltaY.ToString(CultureInfo.InvariantCulture)
+                + "," + deltaZ.ToString(CultureInfo.InvariantCulture)
+                + " ordered="
+                + (record.Kind == ReplicationBuildPlacementKind.BeamX
+                    ? record.Start.X <= record.End.X
+                    : record.Start.Z <= record.End.Z);
+        }
+
+        private static string FormatReplicationBuildGridPosition(ReplicationBuildGridPosition position)
+        {
+            return position.X.ToString(CultureInfo.InvariantCulture)
+                + "," + position.Y.ToString(CultureInfo.InvariantCulture)
+                + "," + position.Z.ToString(CultureInfo.InvariantCulture);
         }
 
         private static bool TryResolveReplicationBuildBlueprintIsRoof(string blueprintId)
@@ -983,6 +1298,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 int scaleZ,
                 List<ReplicationBuildGridPosition>? positions = null)
             {
+                Kind = isRoof ? ReplicationBuildPlacementKind.Roof : ReplicationBuildPlacementKind.Normal;
                 IsRoof = isRoof;
                 X = x;
                 Y = y;
@@ -994,6 +1310,45 @@ namespace GoingCooperative.Plugin.BepInEx
                 Positions = positions ?? new List<ReplicationBuildGridPosition>();
             }
 
+            private ReplicationBuildPlacementRecord(
+                ReplicationBuildPlacementKind kind,
+                int x,
+                int y,
+                int z,
+                int angleY,
+                ReplicationBuildGridPosition start,
+                bool startIsBuilding,
+                ReplicationBuildGridPosition end,
+                bool endIsBuilding,
+                int socketSide)
+                : this(false, x, y, z, angleY, 1, 1, 1)
+            {
+                Kind = kind;
+                Start = start;
+                StartIsBuilding = startIsBuilding;
+                End = end;
+                EndIsBuilding = endIsBuilding;
+                SocketSide = socketSide;
+            }
+
+            public static ReplicationBuildPlacementRecord CreateBeam(
+                ReplicationBuildPlacementKind kind, int x, int y, int z, int angleY,
+                ReplicationBuildGridPosition start, bool startIsBuilding,
+                ReplicationBuildGridPosition end, bool endIsBuilding)
+            {
+                return new ReplicationBuildPlacementRecord(
+                    kind, x, y, z, angleY, start, startIsBuilding, end, endIsBuilding, 0);
+            }
+
+            public static ReplicationBuildPlacementRecord CreateSocketable(
+                int x, int y, int z, int angleY, ReplicationBuildGridPosition owner, int socketSide)
+            {
+                return new ReplicationBuildPlacementRecord(
+                    ReplicationBuildPlacementKind.Socketable,
+                    x, y, z, angleY, owner, true, default(ReplicationBuildGridPosition), false, socketSide);
+            }
+
+            public ReplicationBuildPlacementKind Kind { get; private set; }
             public bool IsRoof { get; }
             public int X { get; }
             public int Y { get; }
@@ -1003,6 +1358,20 @@ namespace GoingCooperative.Plugin.BepInEx
             public int ScaleY { get; }
             public int ScaleZ { get; }
             public List<ReplicationBuildGridPosition> Positions { get; }
+            public ReplicationBuildGridPosition Start { get; }
+            public bool StartIsBuilding { get; }
+            public ReplicationBuildGridPosition End { get; }
+            public bool EndIsBuilding { get; }
+            public int SocketSide { get; }
+        }
+
+        private enum ReplicationBuildPlacementKind
+        {
+            Normal,
+            Roof,
+            BeamX,
+            BeamZ,
+            Socketable
         }
 
         private readonly struct ReplicationBuildGridPosition

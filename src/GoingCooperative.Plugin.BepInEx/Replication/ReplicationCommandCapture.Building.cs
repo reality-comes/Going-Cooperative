@@ -25,6 +25,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationBuildBatchRecoveryAttempted;
         private static string replicationBuildBatchRecoveryReason = string.Empty;
         private const int ReplicationBuildBatchReplayMaxFailures = 8;
+        private static ReplicationBuildSemanticContext? replicationActiveBuildSemanticContext;
 
         private static readonly string[] ReplicationBuildBlueprintIdMemberNames =
         {
@@ -88,6 +89,23 @@ namespace GoingCooperative.Plugin.BepInEx
                         BindingFlags.Static | BindingFlags.NonPublic)));
 
                 patched++;
+                foreach (var methodName in new[] { "SpawnBeamAxisX", "SpawnBeamAxisZ", "TryPlaceSocketable" })
+                {
+                    var semanticMethod = AccessTools.GetDeclaredMethods(placementManagerType)
+                        .Find(method => string.Equals(method.Name, methodName, StringComparison.Ordinal));
+                    if (semanticMethod == null)
+                    {
+                        continue;
+                    }
+
+                    harmonyInstance.Patch(
+                        semanticMethod,
+                        prefix: new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                            nameof(ReplicationBuildSemanticPrefix), BindingFlags.Static | BindingFlags.NonPublic)),
+                        finalizer: new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                            nameof(ReplicationBuildSemanticFinalizer), BindingFlags.Static | BindingFlags.NonPublic)));
+                    patched++;
+                }
                 AppendPluginLog("Replication build transaction surfaces patched: "
                     + placementManagerType.FullName
                     + ".OnLeftMouseUp + ObjectPlacedOnMap");
@@ -101,6 +119,133 @@ namespace GoingCooperative.Plugin.BepInEx
                     + ex.Message);
                 return 0;
             }
+        }
+
+        private static void ReplicationBuildSemanticPrefix(
+            MethodBase __originalMethod,
+            object[] __args,
+            out ReplicationBuildSemanticPatchState __state)
+        {
+            __state = new ReplicationBuildSemanticPatchState(replicationActiveBuildSemanticContext, null);
+            var isBeamMethod = string.Equals(__originalMethod.Name, "SpawnBeamAxisX", StringComparison.Ordinal)
+                || string.Equals(__originalMethod.Name, "SpawnBeamAxisZ", StringComparison.Ordinal);
+            if (isBeamMethod
+                && replicationActiveBuildCaptureTransaction == null
+                && replicationActiveAuthoritativeBuildApplyCapture == null
+                && replicationConfigBeamLifecycleReplication
+                && replicationConfigHostMode
+                && ShouldCaptureReplicationBuildTransaction())
+            {
+                var implicitTransaction = new ReplicationBuildCaptureTransaction(
+                    ++replicationBuildCaptureTransactionSequence);
+                replicationActiveBuildCaptureTransaction = implicitTransaction;
+                __state = new ReplicationBuildSemanticPatchState(
+                    replicationActiveBuildSemanticContext,
+                    implicitTransaction);
+            }
+
+            if (replicationActiveBuildCaptureTransaction == null
+                && replicationActiveAuthoritativeBuildApplyCapture == null)
+            {
+                return;
+            }
+
+            if (isBeamMethod)
+            {
+                if (!replicationConfigBeamPlacementReplication || __args.Length < 3
+                    || !TryCaptureReplicationSemanticEndpoint(__args[1], out var start, out var startIsBuilding)
+                    || !TryCaptureReplicationSemanticEndpoint(__args[2], out var end, out var endIsBuilding))
+                {
+                    return;
+                }
+
+                replicationActiveBuildSemanticContext = ReplicationBuildSemanticContext.CreateBeam(
+                    string.Equals(__originalMethod.Name, "SpawnBeamAxisX", StringComparison.Ordinal)
+                        ? ReplicationBuildPlacementKind.BeamX
+                        : ReplicationBuildPlacementKind.BeamZ,
+                    start,
+                    startIsBuilding,
+                    end,
+                    endIsBuilding);
+                return;
+            }
+
+            if (string.Equals(__originalMethod.Name, "TryPlaceSocketable", StringComparison.Ordinal)
+                && replicationConfigSocketablePlacementReplication
+                && __args.Length >= 4
+                && TryCaptureReplicationSemanticEndpoint(__args[1], out var owner, out _))
+            {
+                replicationActiveBuildSemanticContext = ReplicationBuildSemanticContext.CreateSocketable(
+                    owner,
+                    Convert.ToInt32(__args[2], CultureInfo.InvariantCulture));
+            }
+        }
+
+        private static Exception? ReplicationBuildSemanticFinalizer(
+            Exception? __exception,
+            ReplicationBuildSemanticPatchState __state)
+        {
+            replicationActiveBuildSemanticContext = __state.PreviousContext;
+            var transaction = __state.ImplicitTransaction;
+            if (transaction != null && ReferenceEquals(replicationActiveBuildCaptureTransaction, transaction))
+            {
+                replicationActiveBuildCaptureTransaction = null;
+                if (__exception == null
+                    && !transaction.HasCaptureFailure
+                    && transaction.RawViews.Count == transaction.Placements.Count
+                    && transaction.UnsupportedPlacements.Count == 0)
+                {
+                    EmitReplicationCommittedBuildTransaction(transaction);
+                }
+                else
+                {
+                    var rolledBack = RollbackReplicationRawBuildViews(
+                        transaction,
+                        "beam-lifecycle-capture-failed");
+                    if (rolledBack < transaction.RawViews.Count)
+                    {
+                        ScheduleReplicationBuildBatchRecovery("beam-lifecycle-rollback-incomplete");
+                    }
+                }
+
+                transaction.MarkFinalized();
+            }
+
+            return __exception;
+        }
+
+        private static bool TryCaptureReplicationSemanticEndpoint(
+            object? value,
+            out ReplicationBuildGridPosition position,
+            out bool isBuilding)
+        {
+            position = default(ReplicationBuildGridPosition);
+            isBuilding = false;
+            if (value == null)
+            {
+                return false;
+            }
+
+            if (TryResolveReplicationBuildingCandidateGrid(value, out var x, out var y, out var z))
+            {
+                position = new ReplicationBuildGridPosition(x, y, z);
+                isBuilding = value.GetType().Name.IndexOf("Building", StringComparison.OrdinalIgnoreCase) >= 0;
+                return true;
+            }
+
+            if (TryReadInstanceMemberValue(value, "X", out var xValue)
+                && TryReadInstanceMemberValue(value, "Y", out var yValue)
+                && TryReadInstanceMemberValue(value, "Z", out var zValue)
+                && xValue != null && yValue != null && zValue != null)
+            {
+                position = new ReplicationBuildGridPosition(
+                    Convert.ToInt32(xValue, CultureInfo.InvariantCulture),
+                    Convert.ToInt32(yValue, CultureInfo.InvariantCulture),
+                    Convert.ToInt32(zValue, CultureInfo.InvariantCulture));
+                return true;
+            }
+
+            return false;
         }
 
         private static void ReplicationBuildOnLeftMouseUpPrefix(out ReplicationBuildCaptureTransaction? __state)
@@ -323,6 +468,33 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
+            var semantic = replicationActiveBuildSemanticContext;
+            if (semantic != null)
+            {
+                if (semantic.Kind == ReplicationBuildPlacementKind.BeamX
+                    || semantic.Kind == ReplicationBuildPlacementKind.BeamZ)
+                {
+                    if (!TryCaptureReplicationCommittedBeamTopology(
+                            view,
+                            semantic,
+                            x,
+                            y,
+                            z,
+                            angleY,
+                            out record,
+                            out var beamTopologyDetail))
+                    {
+                        detail = beamTopologyDetail;
+                        return false;
+                    }
+                }
+                else if (semantic.Kind == ReplicationBuildPlacementKind.Socketable)
+                {
+                    record = ReplicationBuildPlacementRecord.CreateSocketable(
+                        x, y, z, angleY, semantic.Start, semantic.SocketSide);
+                }
+            }
+
             if (!TryReadReplicationWorldObjectLongMember(
                     buildingInstance,
                     "UniqueId",
@@ -334,7 +506,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
-            if (IsUnsupportedReplicationBuildBlueprint(blueprint, out var unsupportedCategory))
+            if (IsUnsupportedReplicationBuildBlueprint(blueprint, out var unsupportedCategory)
+                && !IsSupportedReplicationSemanticRecord(record, unsupportedCategory))
             {
                 unsupportedReason = "semantic-category=" + unsupportedCategory;
             }
@@ -349,6 +522,76 @@ namespace GoingCooperative.Plugin.BepInEx
                 unsupportedReason);
             detail = "ok";
             return true;
+        }
+
+        private static bool TryCaptureReplicationCommittedBeamTopology(
+            object view,
+            ReplicationBuildSemanticContext semantic,
+            int x,
+            int y,
+            int z,
+            int angleY,
+            out ReplicationBuildPlacementRecord record,
+            out string detail)
+        {
+            record = null!;
+            detail = "beam-topology-unreadable";
+            var beamViewType = AccessTools.TypeByName("NSMedieval.BuildingComponents.BeamViewComponent");
+            if (beamViewType == null || !(view is Component component))
+            {
+                return false;
+            }
+
+            var beamView = component.GetComponent(beamViewType);
+            if (beamView == null
+                || !TryReadInstanceMemberValue(beamView, "BeamComponentInstance", out var beamInstance)
+                || beamInstance == null
+                || !TryReadInstanceMemberValue(beamInstance, "StartSocketGridPosition", out var startValue)
+                || startValue == null
+                || !TryReadReplicationVec3Int(startValue, out var startX, out var startY, out var startZ)
+                || !TryReadInstanceMemberValue(beamInstance, "EndSocketGridPosition", out var endValue)
+                || endValue == null
+                || !TryReadReplicationVec3Int(endValue, out var endX, out var endY, out var endZ))
+            {
+                return false;
+            }
+
+            var startIsBuilding = TryReadInstanceMemberValue(beamInstance, "StartBuilding", out var startBuilding)
+                && startBuilding != null;
+            var endIsBuilding = TryReadInstanceMemberValue(beamInstance, "EndBuilding", out var endBuilding)
+                && endBuilding != null;
+            record = ReplicationBuildPlacementRecord.CreateBeam(
+                semantic.Kind,
+                x,
+                y,
+                z,
+                angleY,
+                new ReplicationBuildGridPosition(startX, startY, startZ),
+                startIsBuilding,
+                new ReplicationBuildGridPosition(endX, endY, endZ),
+                endIsBuilding);
+            detail = "ok beam-topology-native";
+            return true;
+        }
+
+        private static bool IsSupportedReplicationSemanticRecord(
+            ReplicationBuildPlacementRecord record,
+            string category)
+        {
+            if (category.IndexOf("beam", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return replicationConfigBeamPlacementReplication
+                    && (record.Kind == ReplicationBuildPlacementKind.BeamX
+                        || record.Kind == ReplicationBuildPlacementKind.BeamZ);
+            }
+
+            if (category.IndexOf("socket", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return replicationConfigSocketablePlacementReplication
+                    && record.Kind == ReplicationBuildPlacementKind.Socketable;
+            }
+
+            return false;
         }
 
         private static bool TryCaptureReplicationRoofPlacement(
@@ -1065,21 +1308,71 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
-            category = (value.ToString() ?? string.Empty).Trim();
-            try
-            {
-                var numeric = Convert.ToInt32(value, CultureInfo.InvariantCulture);
-                if (numeric == 6 || numeric == 7)
-                {
-                    return true;
-                }
-            }
-            catch
-            {
-            }
+            category = value.GetType().IsEnum
+                ? (Enum.GetName(value.GetType(), value) ?? value.ToString() ?? string.Empty).Trim()
+                : (value.ToString() ?? string.Empty).Trim();
 
             return category.IndexOf("beam", StringComparison.OrdinalIgnoreCase) >= 0
                 || category.IndexOf("socket", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private sealed class ReplicationBuildSemanticContext
+        {
+            private ReplicationBuildSemanticContext(
+                ReplicationBuildPlacementKind kind,
+                ReplicationBuildGridPosition start,
+                bool startIsBuilding,
+                ReplicationBuildGridPosition end,
+                bool endIsBuilding,
+                int socketSide)
+            {
+                Kind = kind;
+                Start = start;
+                StartIsBuilding = startIsBuilding;
+                End = end;
+                EndIsBuilding = endIsBuilding;
+                SocketSide = socketSide;
+            }
+
+            public static ReplicationBuildSemanticContext CreateBeam(
+                ReplicationBuildPlacementKind kind,
+                ReplicationBuildGridPosition start,
+                bool startIsBuilding,
+                ReplicationBuildGridPosition end,
+                bool endIsBuilding)
+            {
+                return new ReplicationBuildSemanticContext(kind, start, startIsBuilding, end, endIsBuilding, 0);
+            }
+
+            public static ReplicationBuildSemanticContext CreateSocketable(
+                ReplicationBuildGridPosition owner,
+                int socketSide)
+            {
+                return new ReplicationBuildSemanticContext(
+                    ReplicationBuildPlacementKind.Socketable,
+                    owner, true, default(ReplicationBuildGridPosition), false, socketSide);
+            }
+
+            public ReplicationBuildPlacementKind Kind { get; }
+            public ReplicationBuildGridPosition Start { get; }
+            public bool StartIsBuilding { get; }
+            public ReplicationBuildGridPosition End { get; }
+            public bool EndIsBuilding { get; }
+            public int SocketSide { get; }
+        }
+
+        private readonly struct ReplicationBuildSemanticPatchState
+        {
+            public ReplicationBuildSemanticPatchState(
+                ReplicationBuildSemanticContext? previousContext,
+                ReplicationBuildCaptureTransaction? implicitTransaction)
+            {
+                PreviousContext = previousContext;
+                ImplicitTransaction = implicitTransaction;
+            }
+
+            public ReplicationBuildSemanticContext? PreviousContext { get; }
+            public ReplicationBuildCaptureTransaction? ImplicitTransaction { get; }
         }
 
         private static int RollbackUnsupportedReplicationBuildPlacements(ReplicationBuildCaptureTransaction transaction)
@@ -1506,6 +1799,7 @@ namespace GoingCooperative.Plugin.BepInEx
             private readonly HashSet<object> rolledBackViews =
                 new HashSet<object>(ReferenceObjectComparer.Instance);
             private int currentRoofItemIndex = -1;
+            private int currentSemanticItemIndex = -1;
             private bool disposed;
             private bool rollbackAttempted;
 
@@ -1548,6 +1842,16 @@ namespace GoingCooperative.Plugin.BepInEx
                 currentRoofItemIndex = -1;
             }
 
+            public void SetCurrentSemanticItemIndex(int itemIndex)
+            {
+                currentSemanticItemIndex = itemIndex;
+            }
+
+            public void ClearCurrentSemanticItemIndex()
+            {
+                currentSemanticItemIndex = -1;
+            }
+
             public void TrackUncommittedViews(object collection)
             {
                 if (collection is not IDictionary dictionary)
@@ -1570,7 +1874,7 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 var itemIndex = itemIndexByView.TryGetValue(placement.View, out var trackedIndex)
                     ? trackedIndex
-                    : currentRoofItemIndex;
+                    : currentRoofItemIndex >= 0 ? currentRoofItemIndex : currentSemanticItemIndex;
                 if (itemIndex < 0
                     || itemIndex >= records.Count
                     || results[itemIndex] != null

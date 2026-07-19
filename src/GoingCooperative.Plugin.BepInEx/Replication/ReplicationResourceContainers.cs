@@ -355,7 +355,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 pileDetail = "pile-collect-failed " + pileDetail;
             }
 
-            CollectReplicationProductionStorageContainers(states, ref productionContainers);
+            // Production V2 owns ticket Storage/SecondaryIngredientStorage using
+            // stable ticket IDs. Running this legacy scan at the same time would give
+            // the same native storages two authorities under different container IDs.
+            if (!replicationConfigProductionStateV2)
+            {
+                CollectReplicationProductionStorageContainers(states, ref productionContainers);
+            }
 
             states.Sort((left, right) => string.Compare(left.ContainerId, right.ContainerId, StringComparison.Ordinal));
             detail = "agents="

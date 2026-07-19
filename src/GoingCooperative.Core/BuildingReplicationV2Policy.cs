@@ -427,7 +427,9 @@ namespace GoingCooperative.Core
     public readonly struct BuildingReplicationCapability
     {
         public const string WirePrefix = "building-replication-v2";
-        public const int CurrentTransactionSchemaVersion = 1;
+        // Schema 2 adds tagged BeamX/BeamZ/Socketable placement records. Peers on
+        // schema 1 must fail the hello rather than flattening those records.
+        public const int CurrentTransactionSchemaVersion = 2;
 
         public BuildingReplicationCapability(
             BuildingReplicationMode selectedMode,

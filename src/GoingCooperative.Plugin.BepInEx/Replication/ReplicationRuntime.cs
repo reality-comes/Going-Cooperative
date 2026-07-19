@@ -198,10 +198,10 @@ namespace GoingCooperative.Plugin.BepInEx
                 if (replicationRemoteHelloReceived)
                 {
                     SendHostTransformSnapshotIfDue();
-                    if (!replicationConfigProductionStateV2)
-                    {
-                        SendHostReplicationResourceContainersIfDue();
-                    }
+                    // Production V2 replaces only workstation ticket containers.
+                    // Pawn haul/food/medicine inventories still belong to the shared
+                    // resource-container sender; filtering happens inside collection.
+                    SendHostReplicationResourceContainersIfDue();
                     SendHostReplicationResourcePileStateSnapshotIfDue();
                     SendHostReplicationAgentCarryStateSnapshotIfDue();
                     SendHostReplicationAgentActionHeartbeatIfDue();

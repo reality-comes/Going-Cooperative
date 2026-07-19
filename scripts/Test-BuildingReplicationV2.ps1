@@ -50,6 +50,12 @@ Require-SourcePattern $sources.ConfigSource 'replicationConfigBuildingReplicatio
     "The runtime buildingReplicationV2 default is not enabled."
 Require-SourcePattern $sources.ConfigSource 'case\s+"buildingreplicationv2"\s*:.*?TryParseConfigBool\(.*?replicationConfigBuildingReplicationV2\s*=\s*buildingReplicationV2\s*;' `
     "The buildingReplicationV2 config key is not parsed into the runtime gate."
+foreach ($gate in @("beamPlacementReplication", "beamLifecycleReplication", "socketablePlacementReplication", "beamReplicationDiagnostics")) {
+    Require-SourcePattern $sources.Config ('(?m)^\s*' + $gate + '\s*=\s*true\s*(?:[#;].*)?$') `
+        ("The release config does not enable the test gate " + $gate + ".")
+}
+Require-SourcePattern $sources.CorePolicy 'CurrentTransactionSchemaVersion\s*=\s*2\s*;' `
+    "Tagged beam/socket placement did not bump the strict Building V2 schema."
 
 # Building semantics are part of the hello fingerprint. Missing or differently
 # selected capabilities must refuse rather than silently falling back to legacy.
