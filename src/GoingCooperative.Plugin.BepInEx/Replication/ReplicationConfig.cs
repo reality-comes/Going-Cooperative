@@ -91,6 +91,11 @@ namespace GoingCooperative.Plugin.BepInEx
         // Multiplayer menu implementation. True renders the redesigned v2 menu;
         // false restores the original Canvas menu unchanged (rollback path).
         private static bool replicationConfigUiV2 = true;
+        // Gated (v3) single-flow multiplayer menu: HOST/JOIN choice first, then only
+        // that path's options, then the session screen; no tabs and no settings page.
+        // uiV3=false rolls back to the v2 tab menu unchanged (ui=classic still
+        // restores the original menu below that).
+        private static bool replicationConfigUiV3 = true;
         // Steam networking master gate. Off by default; when on, the multiplayer
         // menu offers a Steam connection mode (lobby, invites, relay tunnel).
         private static bool replicationConfigSteamNetworking;
@@ -379,7 +384,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 LogReplicationInventoryAuthority(current);
 
                 current.Logger.LogInfo("Going Cooperative replication config ui="
-                    + (replicationConfigUiV2 ? "v2" : "classic")
+                    + (replicationConfigUiV3 ? "v3" : replicationConfigUiV2 ? "v2" : "classic")
                     + " steamNetworking="
                     + replicationConfigSteamNetworking
                     + " directTransportSecurityV1="
@@ -1279,6 +1284,19 @@ namespace GoingCooperative.Plugin.BepInEx
                         || string.Equals(value, "v1", StringComparison.OrdinalIgnoreCase))
                     {
                         replicationConfigUiV2 = false;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "uiv3":
+                case "menuv3":
+                case "multiplayeruiv3":
+                    if (TryParseConfigBool(value, out var uiV3))
+                    {
+                        replicationConfigUiV3 = uiV3;
                     }
                     else
                     {

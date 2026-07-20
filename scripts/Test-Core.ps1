@@ -52,6 +52,7 @@ foreach ($testedGate in @(
     "semanticanimalpresentationv2",
     "semanticworkcycledriver",
     "hostsleeppresentationv2",
+    "uiv3",
     "buildingreplicationv2",
     "eventreplication",
     "eventtraderauthority",

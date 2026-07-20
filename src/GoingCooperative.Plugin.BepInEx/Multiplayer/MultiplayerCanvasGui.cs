@@ -133,6 +133,12 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void EnsureMultiplayerCanvasGui()
         {
+            if (replicationConfigUiV3)
+            {
+                EnsureMultiplayerCanvasGuiV3();
+                return;
+            }
+
             if (replicationConfigUiV2)
             {
                 EnsureMultiplayerCanvasGuiV2();
@@ -296,6 +302,12 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void ShowMultiplayerCanvasPage(MultiplayerMenuPage page)
         {
+            if (replicationConfigUiV3)
+            {
+                ShowMultiplayerCanvasPageV3(page);
+                return;
+            }
+
             if (replicationConfigUiV2)
             {
                 ShowMultiplayerCanvasPageV2(page);
