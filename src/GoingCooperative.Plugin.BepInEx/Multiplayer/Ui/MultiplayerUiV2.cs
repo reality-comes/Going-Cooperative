@@ -201,6 +201,7 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private void BuildV2HostPage()
         {
+            EnsureDirectHostSessionCode();
             var content = multiplayerCanvasContent!.transform;
             var steamMode = MultiplayerMenu.ConnectionMode == MultiplayerConnectionMode.Steam;
             BuildV2PageHeading("Host a game", steamMode
@@ -228,9 +229,13 @@ namespace GoingCooperative.Plugin.BepInEx
             else
             {
                 multiplayerCanvasPortInput = CreateV2Input("Listen port", MultiplayerMenu.PortText, 0.40f);
+                if (replicationConfigDirectTransportSecurityV1)
+                {
+                    multiplayerCanvasSessionInput = CreateV2Input("Session code", MultiplayerMenu.DirectSessionCode, 0.30f);
+                }
                 CreateMultiplayerCanvasText(content, "Preflight", "Share this address: " + GetMultiplayerLanAddressSummary() + ":" + MultiplayerMenu.PortText
                     + "   ·   Plugin " + GoingCooperativeConstants.Version + "   ·   Protocol " + GetMultiplayerProtocolLabel(),
-                    13, FontStyle.Normal, TextAnchor.UpperLeft, V2Muted, new Vector2(0f, 0.24f), new Vector2(1f, 0.38f));
+                    13, FontStyle.Normal, TextAnchor.UpperLeft, V2Muted, new Vector2(0f, 0.235f), new Vector2(1f, 0.29f));
             }
 
             var start = CreateV2Button(content, "Start", steamMode ? "HOST OVER STEAM" : "HOST", StartMultiplayerCanvasHostV2, V2Accent, 15f);
@@ -259,8 +264,14 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 multiplayerCanvasHostInput = CreateV2Input("Host address", MultiplayerMenu.HostAddress, 0.54f);
                 multiplayerCanvasPortInput = CreateV2Input("Port", MultiplayerMenu.PortText, 0.40f);
-                CreateMultiplayerCanvasText(content, "Compatibility", "A matching plugin build and protocol must respond before the session becomes Connected.",
-                    13, FontStyle.Normal, TextAnchor.UpperLeft, V2Muted, new Vector2(0f, 0.28f), new Vector2(1f, 0.38f));
+                if (replicationConfigDirectTransportSecurityV1)
+                {
+                    multiplayerCanvasSessionInput = CreateV2Input("Session code", MultiplayerMenu.DirectSessionCode, 0.30f);
+                }
+                CreateMultiplayerCanvasText(content, "Compatibility", replicationConfigDirectTransportSecurityV1
+                    ? "A matching plugin build, protocol, and session code must respond before the session becomes Connected."
+                    : "A matching plugin build and protocol must respond before the session becomes Connected.",
+                    13, FontStyle.Normal, TextAnchor.UpperLeft, V2Muted, new Vector2(0f, 0.235f), new Vector2(1f, 0.29f));
             }
 
             var connect = CreateV2Button(content, "Connect", steamMode ? "CONNECT VIA STEAM" : "CONNECT", StartMultiplayerCanvasJoinV2, V2Accent, 15f);
@@ -336,6 +347,7 @@ namespace GoingCooperative.Plugin.BepInEx
             }
             else
             {
+                if (replicationConfigDirectTransportSecurityV1) MultiplayerMenu.DirectSessionCode = multiplayerCanvasSessionInput?.text ?? MultiplayerMenu.DirectSessionCode;
                 TryStartMultiplayerHost(MultiplayerMenu.PortText, out detail);
             }
 
@@ -363,6 +375,7 @@ namespace GoingCooperative.Plugin.BepInEx
             {
                 MultiplayerMenu.HostAddress = multiplayerCanvasHostInput?.text ?? MultiplayerMenu.HostAddress;
                 MultiplayerMenu.PortText = multiplayerCanvasPortInput?.text ?? MultiplayerMenu.PortText;
+                if (replicationConfigDirectTransportSecurityV1) MultiplayerMenu.DirectSessionCode = multiplayerCanvasSessionInput?.text ?? MultiplayerMenu.DirectSessionCode;
                 TryJoinMultiplayerHost(MultiplayerMenu.HostAddress, MultiplayerMenu.PortText, out detail);
             }
 

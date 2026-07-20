@@ -78,7 +78,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 multiplayerHandledLoadGeneration = 0;
                 multiplayerHandledResumeGeneration = 0;
                 multiplayerHostCheckpointToLoad = save;
-                multiplayerSaveTransfer.StartHost(port, save);
+                multiplayerSaveTransfer.StartHost(port, save, replicationDirectSecurityActive, replicationDirectSessionCode);
                 detail = "Waiting for Connections. Selected load: " + save.VillageName + " / " + save.FileName;
                 return true;
             }
@@ -93,7 +93,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 multiplayerHandledLoadGeneration = 0;
                 multiplayerHandledResumeGeneration = 0;
                 var saveRoot = Path.Combine(Application.persistentDataPath, "VillageSaves");
-                multiplayerSaveTransfer.StartClient(host, port, saveRoot);
+                multiplayerSaveTransfer.StartClient(host, port, saveRoot, replicationDirectSecurityActive, replicationDirectSessionCode);
                 detail = "Connecting and waiting to receive the host load.";
                 return true;
             }

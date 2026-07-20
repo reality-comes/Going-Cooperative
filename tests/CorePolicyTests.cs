@@ -33,6 +33,7 @@ internal static class CorePolicyTests
 
     public static int Main()
     {
+        failures += DirectTransportSecurityTests.Run();
         var pause = LockstepCommandPayloads.CreatePausePayload(true);
         Equal(true, LockstepCommandPayloads.TryReadPausePayload(pause, out var paused), "pause payload runtime-safe parse");
         Equal(true, paused, "pause payload value");

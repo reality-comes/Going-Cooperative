@@ -28,6 +28,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private static long replicationPumpHandlerExceptions;
         private static long replicationLastTransportDecodeFailures;
         private static long replicationLastTransportChunkFailures;
+        private static long replicationLastTransportAuthenticationFailures;
         private static float replicationNextSnapshotRealtime;
         private static float replicationNextStatusLogRealtime;
         private static float replicationNextSnapshotValidationRealtime;
@@ -125,7 +126,7 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationRuntimeStartAttempted = true;
             try
             {
-                replicationTransport = new UdpNetworkTransport();
+                replicationTransport = new UdpNetworkTransport(replicationDirectSecurityActive, replicationDirectSessionCode);
                 if (replicationConfigHostMode)
                 {
                     replicationTransport.StartHost(replicationConfigPort);
@@ -152,6 +153,8 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigPort.ToString(CultureInfo.InvariantCulture)
                     + " protocol="
                     + ReplicationPayloadCodec.ProtocolVersion
+                    + " directSecurity="
+                    + (replicationDirectSecurityActive ? "authenticated-v1" : "legacy")
                     + " buildHash="
                     + replicationLocalBuildHash);
             }
@@ -189,6 +192,7 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             PumpReplicationTransport();
+            WarnReplicationTransportDropsIfDue();
             SendReplicationHelloIfDue();
             if (replicationConfigHostMode)
             {
@@ -268,6 +272,10 @@ namespace GoingCooperative.Plugin.BepInEx
             ResetReplicationPlantLifecycleV1State();
             ClearReplicationBuildBatchRuntimeState();
             replicationNextHelloLogRealtime = 0f;
+            replicationLastTransportDecodeFailures = 0;
+            replicationLastTransportChunkFailures = 0;
+            replicationLastTransportAuthenticationFailures = 0;
+            replicationNextTransportDropWarnRealtime = 0f;
             replicationNextSnapshotValidationRealtime = 0f;
             replicationNextResourcePileStateSnapshotRealtime = 0f;
             replicationNextAgentCarryStateSnapshotRealtime = 0f;
@@ -2169,12 +2177,20 @@ namespace GoingCooperative.Plugin.BepInEx
             return transport != null ? transport.ChunkFailures : 0L;
         }
 
+        private static long GetReplicationTransportAuthenticationFailures()
+        {
+            var transport = replicationTransport;
+            return transport != null ? transport.AuthenticationFailures : 0L;
+        }
+
         private void WarnReplicationTransportDropsIfDue()
         {
             var decodeFailures = GetReplicationTransportDecodeFailures();
             var chunkFailures = GetReplicationTransportChunkFailures();
+            var authenticationFailures = GetReplicationTransportAuthenticationFailures();
             if (decodeFailures == replicationLastTransportDecodeFailures
-                && chunkFailures == replicationLastTransportChunkFailures)
+                && chunkFailures == replicationLastTransportChunkFailures
+                && authenticationFailures == replicationLastTransportAuthenticationFailures)
             {
                 return;
             }
@@ -2190,9 +2206,13 @@ namespace GoingCooperative.Plugin.BepInEx
                 + " (+" + (decodeFailures - replicationLastTransportDecodeFailures).ToString(CultureInfo.InvariantCulture) + ")"
                 + " chunkDrops="
                 + chunkFailures.ToString(CultureInfo.InvariantCulture)
-                + " (+" + (chunkFailures - replicationLastTransportChunkFailures).ToString(CultureInfo.InvariantCulture) + ")");
+                + " (+" + (chunkFailures - replicationLastTransportChunkFailures).ToString(CultureInfo.InvariantCulture) + ")"
+                + " authenticationDrops="
+                + authenticationFailures.ToString(CultureInfo.InvariantCulture)
+                + " (+" + (authenticationFailures - replicationLastTransportAuthenticationFailures).ToString(CultureInfo.InvariantCulture) + ")");
             replicationLastTransportDecodeFailures = decodeFailures;
             replicationLastTransportChunkFailures = chunkFailures;
+            replicationLastTransportAuthenticationFailures = authenticationFailures;
         }
 
         private void LogReplicationStatusIfDue()

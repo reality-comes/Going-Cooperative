@@ -35,6 +35,8 @@ namespace GoingCooperative.Plugin.BepInEx
 
         public string SessionName { get; set; } = Environment.UserName + "'s Settlement";
 
+        public string DirectSessionCode { get; set; } = string.Empty;
+
         public string StatusMessage { get; set; } = "Choose Host or Join to begin.";
 
         public bool ShowAdvanced { get; set; }

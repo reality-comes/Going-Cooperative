@@ -94,6 +94,9 @@ namespace GoingCooperative.Plugin.BepInEx
         // Steam networking master gate. Off by default; when on, the multiplayer
         // menu offers a Steam connection mode (lobby, invites, relay tunnel).
         private static bool replicationConfigSteamNetworking;
+        // Mutual authentication, endpoint pinning, replay protection, and authenticated
+        // save/control records for Direct (IP) sessions. Steam keeps its own trust lane.
+        private static bool replicationConfigDirectTransportSecurityV1;
         private static bool replicationConfigPerfFpsProbe = true;
         private static bool replicationConfigResourcePileStateSnapshots;
         private static bool replicationConfigResourceContainerReplication;
@@ -378,7 +381,9 @@ namespace GoingCooperative.Plugin.BepInEx
                 current.Logger.LogInfo("Going Cooperative replication config ui="
                     + (replicationConfigUiV2 ? "v2" : "classic")
                     + " steamNetworking="
-                    + replicationConfigSteamNetworking);
+                    + replicationConfigSteamNetworking
+                    + " directTransportSecurityV1="
+                    + replicationConfigDirectTransportSecurityV1);
 
                 if (replicationConfigEventReplication
                     && replicationConfigEventSchedulerAuthority
@@ -1287,6 +1292,19 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryParseConfigBool(value, out var steamNetworking))
                     {
                         replicationConfigSteamNetworking = steamNetworking;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "directtransportsecurityv1":
+                case "authenticateddirecttransport":
+                case "directsecurity":
+                    if (TryParseConfigBool(value, out var directTransportSecurityV1))
+                    {
+                        replicationConfigDirectTransportSecurityV1 = directTransportSecurityV1;
                     }
                     else
                     {

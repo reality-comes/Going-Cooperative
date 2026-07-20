@@ -1,17 +1,23 @@
 using System;
 using System.Globalization;
 using GoingCooperative.Core.Replication;
+using GoingCooperative.Core;
 
 namespace GoingCooperative.Plugin.BepInEx
 {
     public sealed partial class GoingCooperativePlugin
     {
+        private static bool replicationDirectSecurityActive;
+        private static string replicationDirectSessionCode = string.Empty;
+
         private bool TryStartMultiplayerHost(string portText, out string detail)
         {
             if (!TryParseMultiplayerPort(portText, out var port, out detail))
             {
                 return false;
             }
+
+            if (!ValidateDirectSessionSecurity(hostMode: true, out detail)) return false;
 
             ApplyMultiplayerSessionOptions(hostMode: true, "0.0.0.0", port);
             if (!StartMultiplayerSaveHost(port, out detail))
@@ -41,6 +47,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
+            if (!ValidateDirectSessionSecurity(hostMode: false, out detail)) return false;
+
             ApplyMultiplayerSessionOptions(hostMode: false, host, port);
             if (!StartMultiplayerSaveClient(host, port, out detail))
             {
@@ -58,6 +66,11 @@ namespace GoingCooperative.Plugin.BepInEx
             replicationConfigPort = port;
             replicationConfigApplySnapshots = !hostMode;
             replicationConfigSuppressClientSimulation = !hostMode;
+            replicationDirectSecurityActive = replicationConfigDirectTransportSecurityV1
+                && MultiplayerMenu.ConnectionMode == MultiplayerConnectionMode.Direct;
+            replicationDirectSessionCode = replicationDirectSecurityActive
+                ? DirectTransportSecurity.NormalizeCode(MultiplayerMenu.DirectSessionCode)
+                : string.Empty;
             // Preserve the original, proven lifecycle: native save loading completes
             // before replication or client authority suppression becomes active.
             replicationConfigEnabled = false;
@@ -73,7 +86,35 @@ namespace GoingCooperative.Plugin.BepInEx
             StopMultiplayerSteamSession();
             multiplayerSaveTransfer.Stop();
             StopReplicationRuntime(ReplicationTraderPartyResetContext.StopInPlace);
+            replicationDirectSecurityActive = false;
+            replicationDirectSessionCode = string.Empty;
+            MultiplayerMenu.DirectSessionCode = string.Empty;
             LogReplicationInfo("Going Cooperative multiplayer session stopped from menu.");
+        }
+
+        private bool ValidateDirectSessionSecurity(bool hostMode, out string detail)
+        {
+            if (!replicationConfigDirectTransportSecurityV1 || MultiplayerMenu.ConnectionMode != MultiplayerConnectionMode.Direct)
+            {
+                detail = string.Empty;
+                return true;
+            }
+            if (hostMode && string.IsNullOrWhiteSpace(MultiplayerMenu.DirectSessionCode))
+            {
+                MultiplayerMenu.DirectSessionCode = DirectTransportSecurity.GenerateSessionCode();
+            }
+            if (!DirectTransportSecurity.TryDeriveKey(MultiplayerMenu.DirectSessionCode, out _, out detail)) return false;
+            return true;
+        }
+
+        private void EnsureDirectHostSessionCode()
+        {
+            if (replicationConfigDirectTransportSecurityV1
+                && MultiplayerMenu.ConnectionMode == MultiplayerConnectionMode.Direct
+                && string.IsNullOrWhiteSpace(MultiplayerMenu.DirectSessionCode))
+            {
+                MultiplayerMenu.DirectSessionCode = DirectTransportSecurity.GenerateSessionCode();
+            }
         }
 
         private static bool TryParseMultiplayerPort(string text, out int port, out string detail)

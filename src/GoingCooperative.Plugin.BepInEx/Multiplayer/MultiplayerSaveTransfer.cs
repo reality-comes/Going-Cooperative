@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using GoingCooperative.Core;
 using NSMedieval;
 
 namespace GoingCooperative.Plugin.BepInEx
@@ -18,6 +19,7 @@ namespace GoingCooperative.Plugin.BepInEx
         private readonly object writeLock = new object();
         private TcpListener? listener;
         private TcpClient? client;
+        private Stream? controlStream;
         private Thread? worker;
         private string saveRoot = string.Empty;
         private volatile bool stopping;
@@ -36,6 +38,8 @@ namespace GoingCooperative.Plugin.BepInEx
         private string receivedSavePath = string.Empty;
         private string receivedVillageName = string.Empty;
         private Exception? failure;
+        private bool directSecurityEnabled;
+        private byte[] directSecurityKey = new byte[0];
 
         public string Phase { get { lock (stateLock) return phase; } }
         public string Detail { get { lock (stateLock) return detail; } }
@@ -49,12 +53,13 @@ namespace GoingCooperative.Plugin.BepInEx
         public string ReceivedVillageName { get { lock (stateLock) return receivedVillageName; } }
         public Exception? Failure { get { return failure; } }
 
-        public void StartHost(int port, VillageSaveInfo save)
+        public void StartHost(int port, VillageSaveInfo save, bool securityEnabled = false, string sessionCode = "")
         {
             if (save == null) throw new ArgumentNullException(nameof(save));
             Stop();
             hostMode = true;
             stopping = false;
+            ConfigureSecurity(securityEnabled, sessionCode);
             SetState("Waiting for Connections", "Listening for a client on TCP port " + port.ToString(CultureInfo.InvariantCulture) + ".", 0f);
             listener = new TcpListener(IPAddress.Any, port);
             listener.Start(1);
@@ -62,12 +67,13 @@ namespace GoingCooperative.Plugin.BepInEx
             worker.Start();
         }
 
-        public void StartClient(string host, int port, string clientSaveRoot)
+        public void StartClient(string host, int port, string clientSaveRoot, bool securityEnabled = false, string sessionCode = "")
         {
             Stop();
             hostMode = false;
             saveRoot = clientSaveRoot;
             stopping = false;
+            ConfigureSecurity(securityEnabled, sessionCode);
             SetState("Connecting", "Opening the persistent multiplayer control channel.", 0f);
             worker = new Thread(() => ClientWorker(host, port)) { IsBackground = true, Name = "Going Cooperative Control Client" };
             worker.Start();
@@ -134,6 +140,7 @@ namespace GoingCooperative.Plugin.BepInEx
             try { client?.Close(); } catch { }
             try { listener?.Stop(); } catch { }
             client = null;
+            controlStream = null;
             listener = null;
             localReady = remoteReady = localLoaded = remoteLoaded = resyncCaptureRequested = false;
             loadGeneration = resumeGeneration = epoch = 0;
@@ -144,15 +151,54 @@ namespace GoingCooperative.Plugin.BepInEx
 
         public void Dispose() { Stop(); }
 
+        private void ConfigureSecurity(bool enabled, string sessionCode)
+        {
+            directSecurityEnabled = enabled;
+            if (!enabled)
+            {
+                directSecurityKey = new byte[0];
+                return;
+            }
+            if (!DirectTransportSecurity.TryDeriveKey(sessionCode, out directSecurityKey, out var error))
+            {
+                throw new ArgumentException(error, nameof(sessionCode));
+            }
+        }
+
         private void HostWorker(VillageSaveInfo initialSave)
         {
             try
             {
-                client = listener!.AcceptTcpClient();
-                client.NoDelay = true;
+                while (!stopping && controlStream == null)
+                {
+                    client = listener!.AcceptTcpClient();
+                    client.NoDelay = true;
+                    var raw = client.GetStream();
+                    if (!directSecurityEnabled)
+                    {
+                        controlStream = raw;
+                        break;
+                    }
+                    try
+                    {
+                        client.ReceiveTimeout = 5000;
+                        client.SendTimeout = 5000;
+                        controlStream = DirectTransportSecurity.AuthenticateTcpHost(raw, directSecurityKey);
+                        client.ReceiveTimeout = 0;
+                        client.SendTimeout = 0;
+                    }
+                    catch (Exception ex) when (ex is IOException || ex is InvalidDataException || ex is SocketException)
+                    {
+                        try { client.Close(); } catch { }
+                        client = null;
+                        controlStream = null;
+                        SetState("Waiting for Connections", "Rejected an unauthenticated connection; still waiting for the player with the session code.", 0f);
+                    }
+                }
+                if (stopping || client == null || controlStream == null) return;
                 SendCommand("HELLO", 0, Magic);
                 SendBundle(initialSave, false);
-                ReadHostCommands(new BinaryReader(client.GetStream(), Encoding.UTF8, true));
+                ReadHostCommands(new BinaryReader(controlStream, Encoding.UTF8, true));
             }
             catch (Exception ex) { Fail(ex); }
         }
@@ -162,8 +208,28 @@ namespace GoingCooperative.Plugin.BepInEx
             try
             {
                 client = new TcpClient { NoDelay = true };
+                if (directSecurityEnabled)
+                {
+                    client.ReceiveTimeout = 5000;
+                    client.SendTimeout = 5000;
+                }
                 client.Connect(host, port);
-                var reader = new BinaryReader(client.GetStream(), Encoding.UTF8, true);
+                var raw = client.GetStream();
+                if (directSecurityEnabled)
+                {
+                    try { controlStream = DirectTransportSecurity.AuthenticateTcpClient(raw, directSecurityKey); }
+                    catch (Exception ex) when (ex is IOException || ex is InvalidDataException || ex is SocketException)
+                    {
+                        throw new InvalidDataException("Direct connection authentication failed. Confirm the host address and session code, then try again.", ex);
+                    }
+                }
+                else
+                {
+                    controlStream = raw;
+                }
+                client.ReceiveTimeout = 0;
+                client.SendTimeout = 0;
+                var reader = new BinaryReader(controlStream, Encoding.UTF8, true);
                 if (reader.ReadString() != "HELLO" || reader.ReadInt32() != 0 || reader.ReadString() != Magic)
                     throw new InvalidDataException("The host control protocol is incompatible.");
                 ReadClientCommands(reader);
@@ -246,7 +312,8 @@ namespace GoingCooperative.Plugin.BepInEx
             var files = GetSaveBundle(save.FilePath);
             lock (writeLock)
             {
-                var writer = new BinaryWriter(client.GetStream(), Encoding.UTF8, true);
+                if (controlStream == null) throw new InvalidOperationException("The control channel is not ready.");
+                var writer = new BinaryWriter(controlStream, Encoding.UTF8, true);
                 writer.Write("BUNDLE"); writer.Write(bundleEpoch);
                 writer.Write(Path.GetFileName(save.FilePath));
                 writer.Write(save.VillageName ?? string.Empty);
@@ -345,7 +412,8 @@ namespace GoingCooperative.Plugin.BepInEx
             if (client == null) throw new IOException("Control channel is not connected.");
             lock (writeLock)
             {
-                var writer = new BinaryWriter(client.GetStream(), Encoding.UTF8, true);
+                if (controlStream == null) throw new InvalidOperationException("The control channel is not ready.");
+                var writer = new BinaryWriter(controlStream, Encoding.UTF8, true);
                 writer.Write(command); writer.Write(commandEpoch);
                 if (payload != null) writer.Write(payload);
                 writer.Flush();

@@ -20,8 +20,10 @@ $sources = @(
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\TransportContracts.cs"),
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\TransportEnvelopeCodec.cs"),
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\TransportChunkCodec.cs"),
+    (Join-Path $repositoryRoot "src\GoingCooperative.Core\DirectTransportSecurity.cs"),
     (Join-Path $repositoryRoot "src\GoingCooperative.Core\LockstepCommandPayloads.cs"),
     (Join-Path $repositoryRoot "tests\BuildingReplicationV2PolicyTests.cs"),
+    (Join-Path $repositoryRoot "tests\DirectTransportSecurityTests.cs"),
     (Join-Path $repositoryRoot "tests\CorePolicyTests.cs")
 )
 
@@ -67,6 +69,7 @@ foreach ($testedGate in @(
     "resourcecontainerreplication")) {
     if ($settings[$testedGate] -ne "true") { throw "Committed test config must enable $testedGate." }
 }
+if ($settings["directtransportsecurityv1"] -ne "true") { throw "Committed test config must enable directTransportSecurityV1." }
 foreach ($disabledGate in @(
     "eventschedulerauthority",
     "eventwarningreplication",
