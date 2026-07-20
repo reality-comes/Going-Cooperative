@@ -4451,6 +4451,11 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryApplyReplicationWorldObjectDelta(ReplicationWorldObjectDelta delta, out string detail)
         {
+            if (string.Equals(delta.DeltaKind, ReplicationPlantLifecycleSpawnDeltaKind, StringComparison.Ordinal))
+            {
+                return TryApplyReplicationPlantLifecycleV1(delta, out detail);
+            }
+
             if (IsReplicationTraderPartyDeltaKind(delta.DeltaKind))
             {
                 return TryApplyReplicationTraderPartyWorldDelta(delta, out detail);

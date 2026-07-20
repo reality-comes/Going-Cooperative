@@ -69,6 +69,14 @@ namespace GoingCooperative.Plugin.BepInEx
         private static bool replicationConfigBeamPlacementReplication;
         private static bool replicationConfigBeamLifecycleReplication;
         private static bool replicationConfigSocketablePlacementReplication;
+        private static bool replicationConfigCropfieldSpatialReplicationV1;
+        // Host-authoritative cropfield menu policies: crop type, sowing, priority,
+        // sow range, harvest/cut phases, and pasted policy state.
+        private static bool replicationConfigCropfieldPolicyV1;
+        // Focused cropfield setter/capture diagnostics. Functional replication and
+        // reconcile remain active when this diagnostic-only gate is disabled.
+        private static bool replicationConfigCropfieldPolicyDiagnostics;
+        private static bool replicationConfigPlantLifecycleReplication;
         // Focused beam capture/replay tracing. This is intentionally independent
         // from the high-volume world-delta and transport diagnostic gates.
         private static bool replicationConfigBeamReplicationDiagnostics;
@@ -285,6 +293,14 @@ namespace GoingCooperative.Plugin.BepInEx
                     + replicationConfigBeamLifecycleReplication
                     + " socketablePlacementReplication="
                     + replicationConfigSocketablePlacementReplication
+                    + " cropfieldSpatialReplicationV1="
+                    + replicationConfigCropfieldSpatialReplicationV1
+                    + " cropfieldPolicyV1="
+                    + replicationConfigCropfieldPolicyV1
+                    + " cropfieldPolicyDiagnostics="
+                    + replicationConfigCropfieldPolicyDiagnostics
+                    + " plantLifecycleReplication="
+                    + replicationConfigPlantLifecycleReplication
                     + " beamReplicationDiagnostics="
                     + replicationConfigBeamReplicationDiagnostics
                     + " resourcePileStateSnapshots="
@@ -1064,6 +1080,51 @@ namespace GoingCooperative.Plugin.BepInEx
                     if (TryParseConfigBool(value, out var beamPlacementReplication))
                     {
                         replicationConfigBeamPlacementReplication = beamPlacementReplication;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "cropfieldspatialreplicationv1":
+                    if (TryParseConfigBool(value, out var cropfieldSpatialReplicationV1))
+                    {
+                        replicationConfigCropfieldSpatialReplicationV1 = cropfieldSpatialReplicationV1;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "cropfieldpolicyv1":
+                    if (TryParseConfigBool(value, out var cropfieldPolicyV1))
+                    {
+                        replicationConfigCropfieldPolicyV1 = cropfieldPolicyV1;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "cropfieldpolicydiagnostics":
+                case "cropfielddiagnostics":
+                    if (TryParseConfigBool(value, out var cropfieldPolicyDiagnostics))
+                    {
+                        replicationConfigCropfieldPolicyDiagnostics = cropfieldPolicyDiagnostics;
+                    }
+                    else
+                    {
+                        LogReplicationConfigInvalidValue(current, lineNumber, key, value);
+                    }
+
+                    break;
+                case "plantlifecyclereplication":
+                    if (TryParseConfigBool(value, out var plantLifecycleReplication))
+                    {
+                        replicationConfigPlantLifecycleReplication = plantLifecycleReplication;
                     }
                     else
                     {

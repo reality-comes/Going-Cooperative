@@ -33,6 +33,9 @@ namespace GoingCooperative.Plugin.BepInEx
         private int TryInstallReplicationManagementCapture(Harmony harmony)
         {
             var count = 0;
+            count += TryInstallReplicationCropfieldPolicyV1Hooks(harmony);
+            count += PatchReplicationCropfieldPanelActions(harmony);
+            count += PatchReplicationCropfieldPanelUpdate(harmony);
             count += PatchManagementMethod(harmony, "NSMedieval.UI.ResearchPanelManager", "Unlock", Type.EmptyTypes, nameof(ReplicationResearchUnlockPrefix), nameof(ReplicationResearchUnlockPostfix));
             count += PatchManagementMethod(harmony, "NSMedieval.UI.SelectionExtraProduction", "AddNewProduction", new[] { typeof(string) }, nameof(ReplicationProductionAddPrefix), nameof(ReplicationProductionAddPostfix));
             count += PatchManagementMethod(harmony, "NSMedieval.UI.ProductionLayoutItemView", "CancelProduction", Type.EmptyTypes, nameof(ReplicationProductionTicketPrefix), nameof(ReplicationProductionTicketPostfix));
@@ -560,11 +563,22 @@ namespace GoingCooperative.Plugin.BepInEx
             var current = instance;
             if (payload == null
                 || string.IsNullOrWhiteSpace(payload)
-                || current == null
+                || ReferenceEquals(current, null)
                 || !replicationConfigHostMode
                 || !replicationRuntimeStarted
                 || !replicationRemoteHelloReceived)
             {
+                if (replicationConfigCropfieldPolicyDiagnostics
+                    && source.StartsWith("cropfield-policy", StringComparison.Ordinal))
+                {
+                    current?.LogReplicationInfo(
+                        "Going Cooperative cropfield-policy host broadcast rejected source=" + source
+                        + " payload=" + (string.IsNullOrWhiteSpace(payload) ? "missing" : "ready")
+                        + " instance=" + (ReferenceEquals(current, null) ? "missing" : "ready")
+                        + " hostMode=" + replicationConfigHostMode
+                        + " runtime=" + replicationRuntimeStarted
+                        + " hello=" + replicationRemoteHelloReceived);
+                }
                 return;
             }
 
@@ -676,6 +690,10 @@ namespace GoingCooperative.Plugin.BepInEx
 
         private static bool TryApplyReplicationManagementPolicy(string policy, string targetId, string key, int index, int value, bool enabled, out string detail)
         {
+            if (IsReplicationCropfieldPolicy(policy))
+            {
+                return TryApplyReplicationCropfieldPolicy(policy, targetId, key, index, value, enabled, out detail);
+            }
             if (string.Equals(policy, "AnimalOrder", StringComparison.Ordinal))
             {
                 if (!IsReplicationSupportedAnimalOrder(key, value))

@@ -53,6 +53,7 @@ namespace GoingCooperative.Plugin.BepInEx
                 TryInstallReplicationWorldObjectDeltaClientHooks(harmony);
                 TryInstallReplicationBuildingLifecycleV2Hooks(harmony);
                 TryInstallReplicationBuildingConstructionMaterialsV2Hooks(harmony);
+                TryInstallReplicationPlantLifecycleV1Hooks(harmony);
                 TryInstallReplicationProductionStateV2Hooks(harmony);
                 TryInstallReplicationNeedsHooks(harmony);
                 TryInstallReplicationResultLifecycleProbes(harmony);

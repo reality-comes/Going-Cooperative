@@ -73,8 +73,17 @@ namespace GoingCooperative.Plugin.BepInEx
             var stockpilePostfix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
                 nameof(ReplicationRegionStockpileSpawnPostfix),
                 BindingFlags.Static | BindingFlags.NonPublic));
+            var cropfieldPostfix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationCropfieldCreatePostfix),
+                BindingFlags.Static | BindingFlags.NonPublic));
+            var cropfieldModifyPostfix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationCropfieldModifyPostfix),
+                BindingFlags.Static | BindingFlags.NonPublic));
             var zoneModifyPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
                 nameof(ReplicationStockpileZoneModifyPrefix),
+                BindingFlags.Static | BindingFlags.NonPublic));
+            var cropfieldZoneModifyPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
+                nameof(ReplicationCropfieldZoneModifyPrefix),
                 BindingFlags.Static | BindingFlags.NonPublic));
             var contextualObjectPrefix = new HarmonyMethod(typeof(GoingCooperativePlugin).GetMethod(
                 nameof(ReplicationContextualObjectActionPrefix),
@@ -120,8 +129,12 @@ namespace GoingCooperative.Plugin.BepInEx
             // here commits the previous selection and creates a second command.
             // StockpileView records the mode; ZoneSelectionFinished sends once.
             patchedCount += TryPatchReplicationCommandCaptureMethodByTypeNames(harmonyInstance, stockpilePostfix, "NSMedieval.Stockpiles.StockpileManager", "SpawnStockpile", "NSMedieval.Stockpiles.Stockpile", "NSMedieval.Vec3Int", "NSMedieval.Vec3Int");
+            patchedCount += TryPatchReplicationCommandCaptureMethodByTypeNames(harmonyInstance, cropfieldPostfix, "NSMedieval.Crops.CropsController", "CreateCropfield", "NSMedieval.Vec3Int", "NSMedieval.Vec3Int", "System.String");
+            patchedCount += TryPatchReplicationCommandCaptureMethodByTypeNames(harmonyInstance, cropfieldModifyPostfix, "NSMedieval.Crops.CropsManager", "ModifyCropfield", "NSMedieval.Vec3Int", "NSMedieval.Vec3Int", "NSMedieval.Types.OrderType");
             patchedCount += TryPatchReplicationCommandCaptureMethod(harmonyInstance, zoneModifyPrefix, "NSMedieval.Stockpiles.StockpileView", "ExpandStockpile", Type.EmptyTypes);
             patchedCount += TryPatchReplicationCommandCaptureMethod(harmonyInstance, zoneModifyPrefix, "NSMedieval.Stockpiles.StockpileView", "ShrinkStockpile", Type.EmptyTypes);
+            patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(harmonyInstance, cropfieldZoneModifyPrefix, "NSMedieval.Crops.CropView", "ExpandCropfield");
+            patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(harmonyInstance, cropfieldZoneModifyPrefix, "NSMedieval.Crops.CropView", "ShrinkCropfield");
             patchedCount += TryPatchReplicationCommandCaptureMethodByTypeNames(harmonyInstance, fishingStatePostfix, "NSMedieval.State.MapResourceInstance", "SetCurrentOrder", "NSMedieval.Types.OrderType", "System.Boolean");
             patchedCount += TryPatchReplicationCommandCapturePrefixMethodByTypeNames(
                 harmonyInstance,
@@ -317,11 +330,27 @@ namespace GoingCooperative.Plugin.BepInEx
             }
 
             var orderType = ResolveReplicationAreaOrderCommandType(methodName, areaType);
+            if (string.Equals(orderType, "Crops", StringComparison.Ordinal)
+                && !string.Equals(methodName, "OnAssignCropsArea", StringComparison.Ordinal))
+            {
+                return true;
+            }
+            if (string.Equals(orderType, "Crops", StringComparison.Ordinal)
+                && replicationRuntimeStarted
+                && replicationRemoteHelloReceived
+                && !replicationConfigCropfieldSpatialReplicationV1)
+            {
+                ShowReplicationBuildMessage("Going Cooperative: cropfield placement is disabled for this multiplayer session.");
+                instance?.LogReplicationWarning("Going Cooperative cropfield placement blocked gate=disabled method=" + methodName);
+                return false;
+            }
             if (string.Equals(methodName, "ZoneSelectionFinished", StringComparison.Ordinal)
                 && IsReplicationZoneModifyActive())
             {
                 orderType = replicationZoneModifyOperation;
-                areaType = "StockpileModify";
+                areaType = orderType.IndexOf("Cropfield", StringComparison.Ordinal) >= 0
+                    ? "CropfieldModify"
+                    : "StockpileModify";
                 subType = replicationZoneModifyId;
             }
             instance?.LogReplicationInfo("Going Cooperative replication region area order mode="
@@ -339,6 +368,30 @@ namespace GoingCooperative.Plugin.BepInEx
 
             if (replicationConfigHostMode)
             {
+                // Client-originated area commands are retransmitted from the host
+                // after command application, but host-local area selections never
+                // pass through that intent/ack path. Broadcast the resolved native
+                // selection here so host-created and host-modified cropfields and
+                // stockpiles use the same authoritative replay on the client.
+                instance?.SendReplicationRegionOrderState(
+                    orderType,
+                    startX,
+                    startY,
+                    startZ,
+                    endX,
+                    endY,
+                    endZ,
+                    "None",
+                    areaType,
+                    subType,
+                    "host-local source=area:" + methodName);
+                if (string.Equals(methodName, "ZoneSelectionFinished", StringComparison.Ordinal)
+                    && IsReplicationZoneModifyActive())
+                {
+                    replicationZoneModifyOperation = string.Empty;
+                    replicationZoneModifyId = string.Empty;
+                    replicationZoneModifyRealtime = 0f;
+                }
                 return true;
             }
 
@@ -576,6 +629,40 @@ namespace GoingCooperative.Plugin.BepInEx
                     return true;
                 }
 
+                var targetTypeName = target.GetType().FullName ?? target.GetType().Name;
+                if (string.Equals(targetTypeName, "NSMedieval.Crops.CropView", StringComparison.Ordinal)
+                    && TryReadInstanceMemberValue(target, "cropfieldInstance", out var cropfieldInstance)
+                    && cropfieldInstance != null)
+                {
+                    object? cropfieldGrid = null;
+                    if (TryReadInstanceMemberValue(cropfieldInstance, "Start", out var startValue)
+                        && startValue != null)
+                    {
+                        cropfieldGrid = startValue;
+                    }
+                    else if (TryReadInstanceMemberValue(cropfieldInstance, "Positions", out var positionsValue)
+                        && positionsValue is System.Collections.IEnumerable positions)
+                    {
+                        foreach (var position in positions)
+                        {
+                            if (position != null)
+                            {
+                                cropfieldGrid = position;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (cropfieldGrid != null
+                        && TryReadReplicationVec3Int(cropfieldGrid, out var cropfieldX, out var cropfieldY, out var cropfieldZ))
+                    {
+                        x = cropfieldX;
+                        y = cropfieldY;
+                        z = cropfieldZ;
+                        positionDetail = "source=cropfield-instance-start";
+                    }
+                }
+
                 instance?.LogReplicationInfo("Going Cooperative replication info-panel action captured actionId="
                     + actionId
                     + " orderType="
@@ -593,6 +680,10 @@ namespace GoingCooperative.Plugin.BepInEx
                     + " positionDetail="
                     + positionDetail);
 
+                var infoPanelAreaType = string.Equals(orderType, "Deconstruct", StringComparison.Ordinal)
+                    && string.Equals(targetTypeName, "NSMedieval.Crops.CropView", StringComparison.Ordinal)
+                    ? "InfoPanelCropfieldAction"
+                    : "InfoPanelAction";
                 return !CaptureReplicationRegionOrderIntent(
                     orderType,
                     x,
@@ -602,7 +693,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     y,
                     z,
                     "None",
-                    "InfoPanelAction",
+                    infoPanelAreaType,
                     actionId,
                     "info-panel:" + actionId);
             }
@@ -1578,6 +1669,16 @@ namespace GoingCooperative.Plugin.BepInEx
                 replicationLastAreaOrderSubType = stockpileBlueprintId;
                 replicationLastAreaOrderRealtime = Time.realtimeSinceStartup;
                 return stockpileBlueprintId;
+            }
+
+            if (methodName.IndexOf("Crops", StringComparison.OrdinalIgnoreCase) >= 0
+                && TryReadInstanceMemberValue(instance, "areaID", out var cropfieldIdValue)
+                && cropfieldIdValue is string cropfieldId
+                && !string.IsNullOrWhiteSpace(cropfieldId))
+            {
+                replicationLastAreaOrderSubType = cropfieldId.Trim();
+                replicationLastAreaOrderRealtime = Time.realtimeSinceStartup;
+                return replicationLastAreaOrderSubType;
             }
 
             if (!string.IsNullOrEmpty(replicationLastAreaOrderSubType)

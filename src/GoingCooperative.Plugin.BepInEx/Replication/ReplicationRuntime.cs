@@ -206,6 +206,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     SendHostReplicationAgentCarryStateSnapshotIfDue();
                     SendHostReplicationAgentActionHeartbeatIfDue();
                     SendHostReplicationAgentCharacterStateSnapshotIfDue();
+                    SendHostReplicationPlantLifecycleIfDue();
                     UpdateReplicationBuildingLifecycleV2();
                     if (!replicationConfigProductionStateV2)
                     {
@@ -214,6 +215,7 @@ namespace GoingCooperative.Plugin.BepInEx
                     SendHostReplicationBuildingStateSnapshotIfDue();
                     SendHostReplicationGameTimeSnapshotIfDue();
                     UpdateReplicationAnimalState();
+                    UpdateReplicationCropfieldPolicyV1Host();
                     SendPendingReplicationWorldObjectDeltasIfDue();
                 }
             }
@@ -262,6 +264,8 @@ namespace GoingCooperative.Plugin.BepInEx
             ResetReplicationSemanticAgentWorkPresentation();
             ResetReplicationWorkstationRuntimePresentation();
             ResetReplicationAnimalStateRuntime();
+            ResetReplicationCropfieldPolicyV1State();
+            ResetReplicationPlantLifecycleV1State();
             ClearReplicationBuildBatchRuntimeState();
             replicationNextHelloLogRealtime = 0f;
             replicationNextSnapshotValidationRealtime = 0f;
@@ -677,6 +681,32 @@ namespace GoingCooperative.Plugin.BepInEx
                 return false;
             }
 
+            var localHasCropfieldCapability = TryReadReplicationCapabilitySegment(localBuildHash, "cropfield", out var localCropfieldCapability);
+            var remoteHasCropfieldCapability = TryReadReplicationCapabilitySegment(hello.BuildHash, "cropfield", out var remoteCropfieldCapability);
+            if (!localHasCropfieldCapability
+                || !remoteHasCropfieldCapability
+                || !string.Equals(localCropfieldCapability, remoteCropfieldCapability, StringComparison.Ordinal))
+            {
+                error = "cropfield-capability-mismatch local="
+                    + (localHasCropfieldCapability ? localCropfieldCapability : "missing")
+                    + " remote="
+                    + (remoteHasCropfieldCapability ? remoteCropfieldCapability : "missing");
+                return false;
+            }
+
+            var localHasPlantLifecycleCapability = TryReadReplicationCapabilitySegment(localBuildHash, "plants", out var localPlantLifecycleCapability);
+            var remoteHasPlantLifecycleCapability = TryReadReplicationCapabilitySegment(hello.BuildHash, "plants", out var remotePlantLifecycleCapability);
+            if (!localHasPlantLifecycleCapability
+                || !remoteHasPlantLifecycleCapability
+                || !string.Equals(localPlantLifecycleCapability, remotePlantLifecycleCapability, StringComparison.Ordinal))
+            {
+                error = "plant-lifecycle-capability-mismatch local="
+                    + (localHasPlantLifecycleCapability ? localPlantLifecycleCapability : "missing")
+                    + " remote="
+                    + (remoteHasPlantLifecycleCapability ? remotePlantLifecycleCapability : "missing");
+                return false;
+            }
+
             var localHasGameAssemblyIdentity = TryReadReplicationGameAssemblyIdentity(
                 localBuildHash,
                 out var localGameAssemblyIdentity);
@@ -776,6 +806,12 @@ namespace GoingCooperative.Plugin.BepInEx
                 + FormatReplicationCombatCapabilityFingerprint()
                 + "|events="
                 + FormatReplicationEventCapabilityFingerprint()
+                + "|cropfield="
+                + (replicationConfigCropfieldSpatialReplicationV1 ? "1" : "0")
+                + (replicationConfigCropfieldPolicyV1 ? "1" : "0")
+                + ":2"
+                + "|plants="
+                + (replicationConfigPlantLifecycleReplication ? "1:1" : "0:1")
                 + "|gameasm="
                 + GetReplicationGameAssemblyModuleVersionId();
         }

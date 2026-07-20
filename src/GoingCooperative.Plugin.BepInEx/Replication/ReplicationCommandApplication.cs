@@ -22,6 +22,12 @@ namespace GoingCooperative.Plugin.BepInEx
             string subType,
             out string detail)
         {
+            if (string.Equals(areaType, "InfoPanelCropfieldAction", StringComparison.Ordinal)
+                && string.Equals(orderType, "Deconstruct", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryApplyReplicationCropfieldDeconstruct(startX, startY, startZ, out detail);
+            }
+
             if (string.Equals(areaType, "InfoPanelAction", StringComparison.Ordinal)
                 && (string.Equals(subType, "Cancel", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(subType, "Deconstructing", StringComparison.OrdinalIgnoreCase)
@@ -72,6 +78,16 @@ namespace GoingCooperative.Plugin.BepInEx
             if (IsReplicationStockpileModifyRegionOrder(orderType))
             {
                 return TryInvokeStockpileModifyRegionOrder(orderType, startX, startY, startZ, endX, endY, endZ, subType, out detail);
+            }
+
+            if (IsReplicationCropfieldCreateRegionOrder(orderType))
+            {
+                return TryInvokeCropfieldCreateRegionOrder(startX, startY, startZ, endX, endY, endZ, subType, out detail);
+            }
+
+            if (IsReplicationCropfieldModifyRegionOrder(orderType))
+            {
+                return TryInvokeCropfieldModifyRegionOrder(orderType, startX, startY, startZ, endX, endY, endZ, subType, out detail);
             }
 
             if (IsReplicationSelectionActionRegionOrder(orderType))
@@ -278,6 +294,19 @@ namespace GoingCooperative.Plugin.BepInEx
             return string.Equals(orderType, "Stockpile", StringComparison.Ordinal);
         }
 
+        private static bool IsReplicationCropfieldCreateRegionOrder(string orderType)
+        {
+            return replicationConfigCropfieldSpatialReplicationV1
+                && string.Equals(orderType, "Crops", StringComparison.Ordinal);
+        }
+
+        private static bool IsReplicationCropfieldModifyRegionOrder(string orderType)
+        {
+            return replicationConfigCropfieldSpatialReplicationV1
+                && (string.Equals(orderType, "ExpandCropfield", StringComparison.Ordinal)
+                    || string.Equals(orderType, "ShrinkCropfield", StringComparison.Ordinal));
+        }
+
         private static bool IsReplicationAllowForbidRegionOrder(string orderType)
         {
             return string.Equals(orderType, "Allow", StringComparison.Ordinal)
@@ -349,6 +378,8 @@ namespace GoingCooperative.Plugin.BepInEx
                 || IsReplicationAllowForbidRegionOrder(orderType)
                 || IsReplicationStockpileRegionOrder(orderType)
                 || IsReplicationStockpileModifyRegionOrder(orderType)
+                || IsReplicationCropfieldCreateRegionOrder(orderType)
+                || IsReplicationCropfieldModifyRegionOrder(orderType)
                 || IsReplicationSelectionActionRegionOrder(orderType);
         }
 
